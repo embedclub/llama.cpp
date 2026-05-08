@@ -594,3 +594,26 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
 - [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+
+## Build Version
+### Linux
+#### Debug version
+```
+$ mkdir build && cd build
+$ cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-ggdb3" -DCMAKE_C_FLAGS="-ggdb3" ..
+$ cmake --build . -j$(nproc)
+```
+
+#### Release version
+```
+$ mkdir build && cd build
+$ cmake ../
+$ cmake --build . --config Release -j$(nproc)
+```
+
+## Exce
+### Linux
+```
+$ ./bin/llama-cli -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
+```
+
