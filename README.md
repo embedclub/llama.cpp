@@ -616,4 +616,9 @@ $ cmake --build . --config Release -j$(nproc)
 ```
 $ ./bin/llama-cli -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
 ```
-
+### gdb
+```
+$ gdb ./bin/llama-cli
+input paramters
+$ gdb run -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
+```
