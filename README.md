@@ -622,3 +622,23 @@ $ gdb ./bin/llama-cli
 input paramters
 $ gdb run -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
 ```
+
+### read gguf model tool
+```
+https://netron.app/
+```
+
+### download modelscope model(hf & gguf)
+```
+https://modelscope.cn/models/Qwen/Qwen3.5-0.8B/files
+$ git lfs install
+$ git clone https://www.modelscope.cn/Qwen/Qwen3.5-0.8B.git
+```
+
+### convert hf to gguf
+```
+$ cd llama.cpp
+$ python3.10 convert_hf_to_gguf.py ../Qwen3.5-0.8B --outfile ./model-f16.gguf --outtype f16
+$ ./build/bin/llama-quantize ./model-f16.gguf ./model-q4_k_m.gguf Q4_K_M
+$ ./build/bin/llama-cli -m ./model-q4_k_m.gguf -p "介绍一下人工智能" -n 4096 -t 4
+```
