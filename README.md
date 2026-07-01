@@ -614,19 +614,25 @@ $ cmake --build . --config Release -j$(nproc)
 ## Exce
 ### Linux
 ```
-$ ./bin/llama-cli -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
+$ ./bin/llama-cli -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -c 4608 -t 4
 ```
 ### gdb
 ```
 $ gdb ./bin/llama-cli
 input paramters
-$ gdb run -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -t 4
+$ gdb run -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工智能" -n 4096 -c 4608 -t 4
 ```
 
 ### read gguf model tool
+
+**网址**
+
 ```
 https://netron.app/
 ```
+
+**跳转链接**
+[netron地址](https://netron.app/)
 
 ### download modelscope model(hf & gguf)
 ```
@@ -640,7 +646,7 @@ $ git clone https://www.modelscope.cn/Qwen/Qwen3.5-0.8B.git
 $ cd llama.cpp
 $ python3.10 convert_hf_to_gguf.py ../Qwen3.5-0.8B --outfile ./model-f16.gguf --outtype f16
 $ ./build/bin/llama-quantize ./model-f16.gguf ./model-q4_k_m.gguf Q4_K_M
-$ ./build/bin/llama-cli -m ./model-q4_k_m.gguf -p "介绍一下人工智能" -n 4096 -t 4
+$ ./build/bin/llama-cli -m ./model-q4_k_m.gguf -p "介绍一下人工智能" -n 4096 -c 4608 -t 4
 ```
 
 ### opencode + llama.cpp + llama_server
@@ -654,15 +660,18 @@ $ ./build/bin/llama-server -m Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf --port 8080
 #### 终端2
 ·安装opencode与配置
 macOS指定版本安装，不指定用最新的会出现问题。Linux系统可以用最新版本；Windows系统不想使用GUI版本的话，直接去下载二进制，人为配置环境
-macOS
+
+
+**macOS**
 ```
 $ npm install -g opencode-ai@1.2.6
 $ vim ~/.config/opencode/
 ```
-Windows
-
- [opencode发布连接](https://github.com/anomalyco/opencode/releases)在网页下载`opencode-windows-x64.zip`
-
+**Windows**
+> 下载二进制
+在 [opencode发布连接](https://github.com/anomalyco/opencode/releases)网页上下载`opencode-windows-x64.zip`
+> 生效二进制
+高级环境设置里面Path添加路径
 
 ·配置opencode
 ```C
