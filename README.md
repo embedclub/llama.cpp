@@ -626,12 +626,15 @@ $ gdb run -m ../models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p "介绍一下人工�
 ### read gguf model tool
 
 **网址**
+\
 
 ```
 https://netron.app/
 ```
 
 **跳转链接**
+\
+
 [netron地址](https://netron.app/)
 
 ### download modelscope model(hf & gguf)
@@ -669,8 +672,12 @@ $ vim ~/.config/opencode/
 ```
 **Windows**
 > 下载二进制
+\
+
 在 [opencode发布连接](https://github.com/anomalyco/opencode/releases)网页上下载`opencode-windows-x64.zip`
 > 生效二进制
+\
+
 高级环境设置里面Path添加路径
 
 ·配置opencode
