@@ -642,3 +642,47 @@ $ python3.10 convert_hf_to_gguf.py ../Qwen3.5-0.8B --outfile ./model-f16.gguf --
 $ ./build/bin/llama-quantize ./model-f16.gguf ./model-q4_k_m.gguf Q4_K_M
 $ ./build/bin/llama-cli -m ./model-q4_k_m.gguf -p "介绍一下人工智能" -n 4096 -t 4
 ```
+
+### opencode + llama.cpp + llama_server
+#### 终端1
+```
+$ git push
+$ git reset --hard 74ade5274
+$ ./build/bin/llama-server -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --port 8080
+$ ./build/bin/llama-server -m Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf --port 8080
+```
+#### 终端2
+·安装opencode与配置
+macOS指定版本安装，不指定用最新的会出现问题。Linux系统可以用最新版本；Windows系统不想使用GUI版本的话，直接去下载二进制，人为配置环境
+macOS
+```
+$ npm install -g opencode-ai@1.2.6
+$ vim ~/.config/opencode/
+```
+Windows
+
+ [opencode发布连接](https://github.com/anomalyco/opencode/releases)在网页下载`opencode-windows-x64.zip`
+
+
+·配置opencode
+```C
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local": {
+      "name": "Local LLM",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "qwen3.5-35bA3": {
+          "name": "Qwen 3.5 35BA3B Local"
+        }
+      }
+    }
+  },
+  "model": "local/qwen3.5-35bA3"
+}
+```
+
