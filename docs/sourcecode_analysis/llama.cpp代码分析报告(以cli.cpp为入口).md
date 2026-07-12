@@ -9,7 +9,7 @@
 它不是一个"独立"的客户端，而是**复用了 HTTP 服务器的完整任务调度基础设施**——通过 `server_context` 来运行推理循环，以"内部客户端"（`cli = true`）的方式提交任务并消费流式结果。
 
 ## 二、依赖关系图
-
+```
 tools/cli/cli.cpp
 ├── common/           (通用层)
 │   ├── common.h/cpp     参数定义、初始化、参数解析
@@ -31,7 +31,7 @@ tools/cli/cli.cpp
 │   └── llama-internal...
 │
 └── ggml/             (张量计算后端)
-
+```
 ## 三、main() 函数执行流程
 
 - **初始化** (第 347-355 行)
@@ -116,7 +116,7 @@ tools/cli/cli.cpp
 `task_params` 包含 `stream`, `n_predict`, `sampling`, `antiprompt`, `chat_parser_params` 等。CLI 模式下设置 `cli=true`、`stream=true`、`timings_per_token=true`。
 
 ### 4.5 结果类型系统 (`server_task_result` 层次结构)
-
+```
 server_task_result (抽象基类)
 ├── server_task_result_cmpl_final  — 最终结果（含完整内容 + timings）
 ├── server_task_result_cmpl_partial — 流式增量结果（content_delta + reasoning_content_delta）
@@ -125,7 +125,7 @@ server_task_result (抽象基类)
 ├── server_task_result_error        — 错误信息
 ├── server_task_result_metrics      — 性能指标
 └── server_task_result_slot_save/load/erase — 持久化操作结果
-
+```
 ## 五、核心调用链：`generate_completion()`
 
 ```
@@ -192,7 +192,7 @@ cli_context::generate_completion()
   - 对命令后的文件路径：使用 `std::filesystem::directory_iterator` 遍历目录，支持 `~` 扩展和最长公共前缀
 
 ## 八、聊天模板处理
-
+```
 format_chat()
   │
   ├─ 从 server_context::get_meta() 获取 chat_params
@@ -212,11 +212,11 @@ format_chat()
           ├─ parser          — PEG 解析器（用于解析输出中的标签）
           ├─ thinking_start_tag / thinking_end_tag
           └─ generation_prompt
-
+```
 ## 九、推理预算（Reasoning Budget）
 
 对支持 `` 标签的模型（DeepSeek 系列等），`cli.cpp` 实现了推理预算控制：
-
+```
 任务提交前：
   ├─ 将 reasoning_budget (token 数) 写入 task.params.sampling.reasoning_budget_tokens
   ├─ 将 generation_prompt 写入 task.params.sampling.generation_prompt
@@ -227,7 +227,7 @@ format_chat()
 流式输出时：
   ├─ 检测 reasoning_content_delta → 进入 "思考中" 显示模式
   └─ 检测 content_delta → 退出 "思考中" 模式
-
+```
 ## 十、信号处理与优雅退出
 
 | 机制 | 说明 |
