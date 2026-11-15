@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>include/llama.h 功能分析报告</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d1d9e0;
+    --accent: #0969da;
+    --code-bg: #f6f8fa;
+    --card-bg: #fafbfc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.7;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  h1 { border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+  h2 { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 2.2em; }
+  h3 { margin-top: 1.6em; }
+  code {
+    font-family: "SF Mono", Consolas, "Courier New", monospace;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 0.88em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.92em; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); }
+  .meta { color: var(--muted); font-size: 0.92em; }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .tag {
+    display: inline-block;
+    background: #e8ebef;
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 1px 10px;
+    font-size: 0.78em;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .toc { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px 28px; }
+  .toc ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .line-ref { color: var(--muted); font-size: 0.85em; }
+  ul.api-list { padding-left: 20px; }
+  ul.api-list li { margin: 5px 0; }
+</style>
+</head>
+<body>
+
+<h1><code>include/llama.h</code> 功能分析报告</h1>
+<p class="meta">
+  项目：<code>llama.cpp</code>（ggml-org）&nbsp;|&nbsp;
+  文件：<code>include/llama.h</code>&nbsp;|&nbsp;
+  总行数：1589 行&nbsp;|&nbsp;
+  报告日期：2026-11-12
+</p>
+
+<h2 id="toc">目录</h2>
+<div class="toc">
+  <ol>
+    <li><a href="#overview">文件概述</a></li>
+    <li><a href="#arch">整体架构与设计原则</a></li>
+    <li><a href="#header">文件头部：宏、导入与符号可见性</a></li>
+    <li><a href="#types">核心类型与枚举定义</a></li>
+    <li><a href="#params">参数结构体</a></li>
+    <li><a href="#modules">API 功能模块逐一分析</a></li>
+    <li><a href="#compat">废弃（Deprecated）与向后兼容机制</a></li>
+    <li><a href="#lifecycle">典型使用生命周期</a></li>
+    <li><a href="#summary">总结与观察</a></li>
+  </ol>
+</div>
+
+<h2 id="overview">1. 文件概述</h2>
+<p><code>include/llama.h</code> 是 llama.cpp 项目的<b>唯一公共 C API 头文件</b>，是对外暴露的全部库接口。它为 LLaMA 系列以及其他大语言模型（支持 GGUF 格式的编码器、解码器、编码-解码器、递归型如 Mamba/RWKV、混合型如 Jamba、扩散型如 LLaDA/Dream 等模型）提供：</p>
+<ul>
+  <li>模型加载/保存/量化（GGUF 格式）</li>
+  <li>推理上下文的创建与控制</li>
+  <li>batch 编码与解码（token 推理）</li>
+  <li>词表（vocab）操作与分词/反分词</li>
+  <li>聊天模板应用</li>
+  <li>采样器链（sampling chain）</li>
+  <li>KV/记忆（memory）管理与序列状态</li>
+  <li>状态/会话（session）保存与恢复</li>
+  <li>LoRA 适配器、控制向量（control vector）</li>
+  <li>性能统计、日志、训练（opt）等辅助功能</li>
+</ul>
+<div class="card">
+  <b>关键特征：</b>纯 C 接口（<code>extern "C"</code>），不透明指针（opaque pointer）封装实现细节，所有公共函数以 <code>LLAMA_API</code> 宏标注导出属性，兼容 Windows DLL 与 GCC <code>visibility</code> 两种导出机制。
+</div>
+
+<h2 id="arch">2. 整体架构与设计原则</h2>
+<table>
+  <tr><th>设计原则</th><th>体现</th></tr>
+  <tr>
+    <td>不透明类型（Opaque Types）</td>
+    <td>仅前置声明 <code>struct llama_model</code>、<code>struct llama_context</code>、<code>struct llama_vocab</code>、<code>struct llama_sampler</code>、<code>struct llama_adapter_lora</code>，外部只能通过 API 函数操作，隐藏实现（PIMPL 风格）。见 61–66 行。</td>
+  </tr>
+  <tr>
+    <td>依赖 GGML</td>
+    <td>头文件引入 <code>ggml.h</code>、<code>ggml-cpu.h</code>、<code>ggml-backend.h</code>、<code>ggml-opt.h</code>、<code>gguf.h</code>，复用 GGML 的张量、后端调度、线程池、优化器与 GGUF 容器设施（4–8 行）。</td>
+  </tr>
+  <tr>
+    <td>参数结构体 + 默认值函数</td>
+    <td>配置通过值传递的结构体（<code>llama_model_params</code> / <code>llama_context_params</code> / <code>llama_model_quantize_params</code>）完成，并提供 <code>llama_*_default_params()</code> 获取默认值，保持 ABI 稳定式演进。</td>
+  </tr>
+  <tr>
+    <td>回调注入</td>
+    <td>进度回调、中止回调、eval 回调、tensor 数据回调、日志回调、参数筛选回调等，允许宿主程序介入库内部流程。</td>
+  </tr>
+  <tr>
+    <td>命名分区</td>
+    <td>文件按注释分节组织：C interface / Memory / State / Decoding / Vocab / Tokenization / Chat templates / Sampling / Model split / Performance / Training 等。</td>
+  </tr>
+</table>
+
+<h2 id="header">3. 文件头部：宏、导入与符号可见性 <span class="line-ref">（1–53 行）</span></h2>
+<ul>
+  <li><b>Include guard</b>：<code>LLAMA_H</code> 防止重复包含。</li>
+  <li><b><code>LLAMA_API</code> 导出宏</b>（15–27 行）：编译共享库时，Windows 下按 <code>LLAMA_BUILD</code> 区分 <code>dllexport/dllimport</code>；GCC/Clang 使用 <code>__attribute__((visibility("default")))</code>；静态库时为空。</li>
+  <li><b><code>DEPRECATED(func, hint)</code> 宏</b>（29–35 行）：跨编译器标注废弃函数，并给出迁移提示（GCC 用 <code>__attribute__((deprecated))</code>，MSVC 用 <code>__declspec(deprecated)</code>）。</li>
+  <li><b>常量宏</b>（37–49 行）：
+    <ul>
+      <li><code>LLAMA_DEFAULT_SEED</code> = 0xFFFFFFFF（随机种子）</li>
+      <li><code>LLAMA_TOKEN_NULL</code> = -1（无效 token）</li>
+      <li>历史文件魔数 <code>ggla/ggsn/ggsq</code>；会话文件 magic <code>ggsn</code> + 版本 9；单序列状态文件 magic <code>ggsq</code> + 版本 2。</li>
+    </ul>
+  </li>
+</ul>
+
+<h2 id="types">4. 核心类型与枚举定义 <span class="line-ref">（61–244 行）</span></h2>
+
+<h3>4.1 基础不透明类型与别名</h3>
+<pre><code>struct llama_vocab; struct llama_model; struct llama_context; struct llama_sampler;
+typedef struct llama_memory_i * llama_memory_t;   // 记忆（KV/递归缓存）接口句柄
+typedef int32_t llama_pos;      // token 位置
+typedef int32_t llama_token;    // token id
+typedef int32_t llama_seq_id;   // 序列 id</code></pre>
+
+<h3>4.2 主要枚举</h3>
+<table>
+  <tr><th>枚举</th><th>作用</th><th>要点</th></tr>
+  <tr><td><code>llama_vocab_type</code></td><td>词表/分词器类型</td><td>支持 SPM、BPE、WPM(BERT)、UGM(T5)、RWKV、PLaMo-2 共 7 种，反映多模型家族支持。</td></tr>
+  <tr><td><code>llama_rope_type</code></td><td>旋转位置编码类型</td><td>NONE / NORM / NEOX / MROPE / IMROPE / VISION，部分值直接映射 GGML 的 RoPE 常量。</td></tr>
+  <tr><td><code>llama_token_type</code> / <code>llama_token_attr</code></td><td>token 类别与位掩码属性</td><td>attr 支持 NORMALIZED、LSTRIP、RSTRIP、SINGLE_WORD 等细粒度标志；旧 type 枚举标注待移除。</td></tr>
+  <tr><td><code>llama_ftype</code></td><td>模型量化文件类型</td><td>从 F32/F16 到 Q2_K~Q8_0、IQ 系列非对称量化、BF16、TQ1_0/TQ2_0、MXFP4_MOE、NVFP4、Q1_0 共 40 余种，含已删除项的注释。</td></tr>
+  <tr><td><code>llama_rope_scaling_type</code></td><td>RoPE 外推/缩放策略</td><td>NONE / LINEAR / YaRN / LongRoPE，均可用模型内置值（UNSPECIFIED）。</td></tr>
+  <tr><td><code>llama_pooling_type</code></td><td>embedding 池化方式</td><td>NONE / MEAN / CLS / LAST / RANK（rerank 模型把分类头接入计算图）。</td></tr>
+  <tr><td><code>llama_attention_type</code></td><td>注意力模式</td><td>CAUSAL / NON_CAUSAL（embedding 场景）。</td></tr>
+  <tr><td><code>llama_flash_attn_type</code></td><td>Flash Attention 开关</td><td>AUTO / DISABLED / ENABLED，另有 <code>llama_flash_attn_type_name()</code> 返回名称。</td></tr>
+  <tr><td><code>llama_split_mode</code></td><td>多 GPU 切分策略</td><td>NONE（单卡）/ LAYER（按层）/ ROW（行级张量并行）/ TENSOR。</td></tr>
+  <tr><td><code>llama_model_kv_override_type</code></td><td>模型元数据覆盖类型</td><td>INT / FLOAT / BOOL / STR，配合 tagged union <code>llama_model_kv_override</code>（key 最长 128 字节）。</td></tr>
+  <tr><td><code>llama_model_meta_key</code></td><td>采样相关元数据键</td><td>枚举模型内嵌的推荐采样参数（temperature、top_k、mirostat 等）。</td></tr>
+  <tr><td><code>llama_params_fit_status</code></td><td><code>llama_params_fit()</code> 的结果</td><td>SUCCESS / FAILURE / ERROR。</td></tr>
+</table>
+
+<h3>4.3 关键数据结构</h3>
+<ul>
+  <li><b><code>llama_token_data</code> / <code>llama_token_data_array</code></b>（201–215 行）：采样候选 token 及其 logit/probability；数组带 <code>selected</code>（数组下标而非 token id）与 <code>sorted</code> 标志——调用方不得假设数据已排序。</li>
+  <li><b><code>llama_batch</code></b>（235–244 行）：<b>推理输入的核心结构</b>，SoA 布局：
+    <table>
+      <tr><th>字段</th><th>说明</th></tr>
+      <tr><td><code>token</code></td><td>token id 数组（与 <code>embd</code> 二选一）</td></tr>
+      <tr><td><code>embd</code></td><td>直接输入嵌入向量（n_embd 维 float）</td></tr>
+      <tr><td><code>pos</code></td><td>位置数组，NULL 时自动跟踪</td></tr>
+      <tr><td><code>n_seq_id</code> / <code>seq_id</code></td><td>每个 token 所属的多个序列（NULL 默认 seq 0）</td></tr>
+      <tr><td><code>logits</code></td><td>int8 标志，非 0 才输出该 token 的 logits/embeddings（注释提示未来改名为 output）</td></tr>
+    </table>
+  </li>
+  <li><b><code>llama_progress_callback</code></b>（217 行）：模型加载进度回调，返回 false 可中止加载。</li>
+  <li><b><code>llama_logit_bias</code></b>、<b><code>llama_chat_message</code></b>（role + content）、<b><code>llama_model_imatrix_data</code></b>（量化重要性矩阵）、<b><code>llama_model_tensor_override</code> / <code>llama_model_tensor_buft_override</code></b>（按名称模式覆盖张量类型/缓冲区类型）。</li>
+</ul>
+
+<h2 id="params">5. 参数结构体</h2>
+
+<h3>5.1 <code>llama_model_params</code> <span class="line-ref">（286–322 行）</span></h3>
+<p>控制模型加载行为：</p>
+<ul>
+  <li><code>devices</code>：NULL 结尾的设备列表（NULL = 使用所有设备）。</li>
+  <li><code>tensor_buft_overrides</code>：按模式为张量指定 buffer type。</li>
+  <li><code>n_gpu_layers</code>：GPU 卸载层数，负值 = 全部。</li>
+  <li><code>split_mode</code> / <code>main_gpu</code> / <code>tensor_split</code>：多 GPU 分配。</li>
+  <li><code>progress_callback(+user_data)</code>：加载进度/中止。</li>
+  <li><code>kv_overrides</code>：覆盖 GGUF 元数据键值。</li>
+  <li>布尔组（注释说明集中放置以避免对齐问题）：<code>vocab_only</code>（只载词表）、<code>use_mmap</code>、<code>use_direct_io</code>、<code>use_mlock</code>、<code>check_tensors</code>、<code>use_extra_bufts</code>（权重重打包）、<code>no_host</code>、<code>no_alloc</code>（仅载元数据，模拟分配）。</li>
+</ul>
+
+<h3>5.2 <code>llama_context_params</code> <span class="line-ref">（331–383 行）</span></h3>
+<p>控制推理上下文，是 API 中最复杂的结构：</p>
+<ul>
+  <li><b>尺寸</b>：<code>n_ctx</code>（0 = 从模型读取）、<code>n_batch</code>（逻辑批）、<code>n_ubatch</code>（物理批）、<code>n_seq_max</code>（最大并行序列数）、<code>n_threads</code>/<code>n_threads_batch</code>。</li>
+  <li><b>注意力/位置编码</b>：rope_scaling_type、pooling_type、attention_type、flash_attn_type、rope_freq_base/scale、YaRN 参数组（ext_factor、attn_factor、beta_fast、beta_slow、orig_ctx）、<code>defrag_thold</code>（已废弃的 KV 碎片整理阈值）。</li>
+  <li><b>回调</b>：<code>cb_eval</code>（后端调度 eval 回调）、<code>abort_callback</code>（目前仅 CPU 侧生效）。</li>
+  <li><b>[EXPERIMENTAL] KV 缓存量化</b>：<code>type_k</code>/<code>type_v</code>（GGML 数据类型）。</li>
+  <li><b>布尔组</b>：<code>embeddings</code>、<code>offload_kqv</code>、<code>no_perf</code>、<code>op_offload</code>、<code>swa_full</code>（全尺寸 SWA 缓存，多序列下设 false 可能有性能问题）、<code>kv_unified</code>（跨序列共享统一 KV 缓冲）。</li>
+  <li><b>[EXPERIMENTAL] 后端采样</b>：<code>samplers</code>/<code>n_samplers</code>——把采样链嵌入计算图（需为 <code>llama_sampler_chain_init</code> 构造的链，调用方须保持 sampler 存活）。</li>
+</ul>
+
+<h3>5.3 <code>llama_model_quantize_params</code> <span class="line-ref">（397–412 行）</span></h3>
+<p>量化参数：线程数、目标 ftype、输出张量/嵌入张量类型、是否允许重量化、是否量化 output.weight、only_copy、pure（全部用默认类型）、keep_split（保持分片数）、dry_run（只算体积）、imatrix（重要性矩阵）、kv_overrides、tt_overrides、<code>prune_layers</code>（裁剪指定层）。</p>
+
+<h3>5.4 其他</h3>
+<ul>
+  <li><code>llama_sampler_seq_config</code>（seq_id → sampler 绑定，用于按序列后端采样）。</li>
+  <li><code>llama_sampler_chain_params</code>：仅 <code>no_perf</code>。</li>
+</ul>
+
+<h2 id="modules">6. API 功能模块逐一分析</h2>
+
+<h3>6.1 初始化与线程池 <span class="line-ref">（432–456 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_backend_init()</code> / <code>llama_backend_free()</code>：程序级一次性初始化/清理（free 目前仅 MPI 使用）。</li>
+  <li><code>llama_numa_init(numa)</code>：可选 NUMA 优化。</li>
+  <li><code>llama_attach_threadpool()</code> / <code>llama_detach_threadpool()</code>：显式传入 ggml 线程池（生成线程池 + 批处理线程池），否则 ggml 自动创建。</li>
+  <li>默认参数获取：<code>llama_model_default_params</code>、<code>llama_context_default_params</code>、<code>llama_sampler_chain_default_params</code>、<code>llama_model_quantize_default_params</code>。</li>
+</ul>
+
+<h3>6.2 模型加载 / 保存 / 构建 <span class="line-ref">（458–500 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_model_init_from_user()</code>：从 GGUF 元数据 + 用户提供的张量数据回调在内存中构建模型（张量默认 F32，可通过同名异类型张量覆盖）。</li>
+  <li><code>llama_model_load_from_file()</code>：标准加载；分片文件需遵循 <code>&lt;name&gt;-%05d-of-%05d.gguf</code> 命名。</li>
+  <li><code>llama_model_load_from_file_ptr()</code>：从已打开的 <code>FILE*</code> 加载。</li>
+  <li><code>llama_model_load_from_splits()</code>：自定义命名分片，路径须按顺序传入。</li>
+  <li><code>llama_model_save_to_file()</code> / <code>llama_model_free()</code>。</li>
+  <li>废弃别名：<code>llama_load_model_from_file</code> → <code>llama_model_load_from_file</code>；<code>llama_free_model</code> → <code>llama_model_free</code>。</li>
+</ul>
+
+<h3>6.3 上下文创建与参数自适应 <span class="line-ref">（502–533 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_init_from_model(model, cparams)</code>：由模型创建推理上下文（废弃名 <code>llama_new_context_with_model</code>）；<code>llama_free()</code> 释放。</li>
+  <li><code>llama_params_fit()</code>：<b>自动适配</b>——在设备显存受限时调整 mparams/cparams（假设系统内存无限），可设每设备内存余量 <code>margins</code>、最小上下文 <code>n_ctx_min</code>、日志级别；非线程安全（修改全局 logger 状态）；只修改与默认值一致的参数，上下文仅当原值为 0 时调整。</li>
+</ul>
+
+<h3>6.4 环境能力查询 <span class="line-ref">（535–544 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_time_us()</code>：高精度时间。</li>
+  <li><code>llama_max_devices()</code>、<code>llama_max_parallel_sequences()</code>、<code>llama_max_tensor_buft_overrides()</code>：返回数组容量上限（用于分配 tensor_split / overrides 缓冲）。</li>
+  <li><code>llama_supports_mmap/mlock/gpu_offload/rpc()</code>：运行时能力探测。</li>
+</ul>
+
+<h3>6.5 上下文/模型/词表属性 <span class="line-ref">（546–650 行）</span></h3>
+<ul class="api-list">
+  <li>上下文实际参数查询（推荐创建后回查，实际值可能与请求值不同）：<code>llama_n_ctx</code>、<code>llama_n_ctx_seq</code>、<code>llama_n_batch</code>、<code>llama_n_ubatch</code>、<code>llama_n_seq_max</code>。</li>
+  <li><code>llama_get_model()</code>、<code>llama_get_memory()</code>（获取记忆句柄）、<code>llama_pooling_type()</code>。</li>
+  <li>模型几何信息（新命名）：<code>llama_model_n_ctx_train</code>、<code>llama_model_n_embd</code>、<code>n_embd_inp</code>、<code>n_embd_out</code>、<code>n_layer</code>、<code>n_head</code>、<code>n_head_kv</code>、<code>n_swa</code>、<code>llama_model_rope_freq_scale_train</code>、<code>llama_model_rope_type</code>。旧短名 <code>llama_n_embd/n_layer/n_head/n_ctx_train/n_vocab</code> 均已废弃。</li>
+  <li>分类模型：<code>llama_model_n_cls_out()</code>、<code>llama_model_cls_label()</code>。</li>
+  <li>词表：<code>llama_model_get_vocab()</code>、<code>llama_vocab_type()</code>、<code>llama_vocab_n_tokens()</code>。</li>
+  <li>GGUF 元数据访问（统一约定：返回字符串长度，失败返回 -1 并清空缓冲；需多留 1 字节给 NUL；不支持 GGUF 数组值）：<code>llama_model_meta_val_str(_by_index)</code>、<code>llama_model_meta_count</code>、<code>llama_model_meta_key(_by_index/_str)</code>、<code>llama_model_desc()</code>、<code>llama_model_size()</code>、<code>llama_model_n_params()</code>、<code>llama_model_chat_template()</code>。</li>
+  <li>模型形态判定：<code>llama_model_has_encoder/has_decoder</code>、<code>llama_model_decoder_start_token</code>、<code>llama_model_is_recurrent</code>（Mamba/RWKV）、<code>llama_model_is_hybrid</code>（Jamba/Granite）、<code>llama_model_is_diffusion</code>（LLaDA/Dream）。</li>
+  <li><code>llama_model_quantize()</code>：文件级量化，成功返回 0。</li>
+</ul>
+
+<h3>6.6 适配器（LoRA / 控制向量）<span class="line-ref">（651–708 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_adapter_lora_init(model, path)</code>：加载 LoRA；适配器生命周期依附于模型。</li>
+  <li>适配器 GGUF 元数据访问：与模型同约定（val_str / count / key_by_index / val_str_by_index）。</li>
+  <li><code>llama_adapter_lora_free()</code>：手动释放（否则随模型释放）。</li>
+  <li>aLoRA（调用式 LoRA）：<code>llama_adapter_get_alora_n_invocation_tokens()</code> / <code>llama_adapter_get_alora_invocation_tokens()</code>。</li>
+  <li><code>llama_set_adapters_lora(ctx, adapters, n, scales)</code>：在上下文上启用/切换一组 LoRA（相同则不变更）。</li>
+  <li><code>llama_set_adapter_cvec()</code>：施加控制向量（按层范围 il_start/il_end，数据按 layer 1 起 n_embd×n_layers 排布）；传 NULL 清除。</li>
+</ul>
+
+<h3>6.7 记忆（Memory / KV Cache）管理 <span class="line-ref">（710–782 行）</span></h3>
+<p>通过 <code>llama_memory_t</code> 句柄操作统一抽象的 KV/递归缓存：</p>
+<ul class="api-list">
+  <li><code>llama_memory_clear(mem, data)</code>：清空（data=true 连数据缓冲一起清）。</li>
+  <li><b>序列算术</b>（区间约定统一：<code>p0&lt;0</code> 表示从头，<code>p1&lt;0</code> 表示到末尾）：
+    <code>llama_memory_seq_rm</code>（删除 [p0,p1) 内的 token；整段序列删除永不失败）、<code>seq_cp</code>（复制到另一序列）、<code>seq_keep</code>（只保留某序列）、<code>seq_add</code>（位置整体平移 delta）、<code>seq_div</code>（位置整除 d）。</li>
+  <li><code>llama_memory_seq_pos_min/pos_max()</code>：序列位置上下界（SWA 缓存下 pos_min 通常非 0；[pos_min,pos_max] 区间保证完整；空序列返回 -1）。</li>
+  <li><code>llama_memory_can_shift()</code>：缓存是否支持位置平移。</li>
+</ul>
+
+<h3>6.8 状态 / 会话保存恢复 <span class="line-ref">（784–907 行）</span></h3>
+<ul class="api-list">
+  <li>整上下文状态：<code>llama_state_get_size / get_data / set_data</code>（内存字节流；get_size 仅在保存时使用，恢复时可能偏小）。</li>
+  <li>会话文件：<code>llama_state_load_file / save_file</code>（含 token 序列校验，magic <code>ggsn</code> v9）。</li>
+  <li>单序列状态：<code>llama_state_seq_get_size / get_data / set_data / save_file / load_file</code>，以及带 <code>llama_state_seq_flags</code> 的 _ext 版本。</li>
+  <li>兼容宏：<code>LLAMA_STATE_SEQ_FLAGS_SWA_ONLY</code> 与 <code>LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY</code> 同值（=1），用于仅处理部分状态（SWA KV / Mamba 递归缓存）。</li>
+  <li>全部旧名（<code>llama_get_state_size</code>、<code>llama_copy_state_data</code>、<code>llama_set_state_data</code>、<code>llama_load_session_file</code>、<code>llama_save_session_file</code>）已标废弃。</li>
+</ul>
+
+<h3>6.9 Batch 与解码 <span class="line-ref">（909–1029 行）</span></h3>
+<ul class="api-list">
+  <li><b>batch 工具</b>：<code>llama_batch_get_one()</code>（单序列便捷批，seq 固定 0，注释不推荐使用）、<code>llama_batch_init(n_tokens, embd, n_seq_max)</code>（堆分配，成员全部不初始化）、<code>llama_batch_free()</code>。</li>
+  <li><b><code>llama_encode(ctx, batch)</code></b>：处理 batch，<b>不使用 KV cache</b>；编码-解码模型中走编码器，编码器输出缓存供解码器交叉注意力使用。0 成功，&lt;0 失败且状态回滚。</li>
+  <li><b><code>llama_decode(ctx, batch)</code></b>：核心推理入口，要求上下文有 memory；返回码语义丰富：
+    <table>
+      <tr><th>返回值</th><th>含义</th></tr>
+      <tr><td>0</td><td>成功</td></tr>
+      <tr><td>1</td><td>找不到 KV 槽位（减小 batch 或增大上下文）</td></tr>
+      <tr><td>2</td><td>被中止（已处理的 ubatch 保留在 memory 中）</td></tr>
+      <tr><td>-1</td><td>batch 无效</td></tr>
+      <tr><td>&lt;-1</td><td>致命错误（已处理 ubatch 保留，需用 seq_pos_min/max 查询状态）</td></tr>
+    </table>
+  </li>
+  <li><b>运行时控制</b>：<code>llama_set_n_threads()</code> / <code>llama_n_threads(_batch)()</code>、<code>llama_set_embeddings()</code>、<code>llama_set_causal_attn()</code>、<code>llama_set_warmup()</code>（预热：激活全部张量以载入/缓存权重）、<code>llama_set_abort_callback()</code>、<code>llama_synchronize()</code>（等待计算完成，一般无需手动调用）。</li>
+  <li><b>输出生成</b>：
+    <code>llama_get_logits()</code>（全量输出，行=有输出标志的 token，列=n_vocab；计划废弃）、
+    <code>llama_get_logits_ith()</code>（第 i 个输出，负索引从尾部倒数，无效 id 返回 NULL）、
+    <code>llama_get_embeddings()</code>（仅 pooling=NONE 或生成模型）、
+    <code>llama_get_embeddings_ith()</code>、
+    <code>llama_get_embeddings_seq()</code>（按序列池化结果；RANK 模式返回 n_cls_out 个排序分）。</li>
+</ul>
+
+<h3>6.10 后端采样结果查询 [EXPERIMENTAL] <span class="line-ref">（1031–1055 行）</span></h3>
+<p>当上下文以 <code>llama_context_params.samplers</code> 初始化（采样嵌入计算图）时使用：<code>llama_get_sampled_token_ith()</code>、<code>llama_get_sampled_probs_ith(+count)</code>、<code>llama_get_sampled_logits_ith(+count)</code>、<code>llama_get_sampled_candidates_ith(+count)</code>（candidates 用于把 prob/logit 下标映射回 token id）。</p>
+
+<h3>6.11 词表查询 <span class="line-ref">（1057–1116 行）</span></h3>
+<ul class="api-list">
+  <li>单 token：<code>llama_vocab_get_text / get_score / get_attr</code>、<code>llama_vocab_is_eog</code>（EOG：EOS/EOT 等）、<code>llama_vocab_is_control</code>。</li>
+  <li>特殊 token：<code>bos / eos / eot / sep / nl / pad / mask</code>。</li>
+  <li>自动添加控制：<code>llama_vocab_get_add_bos / add_eos / add_sep</code>。</li>
+  <li>FIM（fill-in-middle 代码补全）token：<code>fim_pre / fim_suf / fim_mid / fim_pad / fim_rep / fim_sep</code>。</li>
+  <li>旧 <code>llama_token_*</code> 系列全部废弃（含 <code>llama_vocab_cls</code>——CLS 等价于 BOS）。</li>
+</ul>
+
+<h3>6.12 分词 / 反分词 <span class="line-ref">（1118–1167 行）</span></h3>
+<ul class="api-list">
+  <li><b><code>llama_tokenize()</code></b>：text→tokens，线程安全。参数 <code>add_special</code>（按模型配置加 BOS/EOS）、<code>parse_special</code>（是否解析特殊/控制 token，不会自动加前导空格）。成功返回 token 数（≤ n_tokens_max）；失败返回负数=所需 token 数；溢出 int32 上限时返回 INT32_MIN。</li>
+  <li><b><code>llama_token_to_piece()</code></b>：单 token→文本片段（不写 NUL；<code>lstrip</code> 可跳过前导空格；<code>special</code> 控制是否渲染特殊 token）。</li>
+  <li><b><code>llama_detokenize()</code></b>：tokens→text，<code>remove_special</code> / <code>unparse_special</code> 与 tokenize 对称；失败返回负数=所需字节数。</li>
+</ul>
+
+<h3>6.13 聊天模板 <span class="line-ref">（1169–1192 行）</span></h3>
+<ul class="api-list">
+  <li><b><code>llama_chat_apply_template()</code></b>：将消息数组格式化为 prompt（仿 HF apply_chat_template，但<b>非 Jinja 解析器</b>，仅支持内置模板集合）；<code>add_ass</code> 决定是否追加 assistant 起始 token；返回完整字节数（超出缓冲需重新分配再调用；建议分配 2×消息总字符）。</li>
+  <li><code>llama_chat_builtin_templates()</code>：列出内置模板名。</li>
+</ul>
+
+<h3>6.14 采样 API <span class="line-ref">（1194–1491 行）</span></h3>
+<p><b>面向对象式插件设计</b>：<code>llama_sampler</code> = 接口表 <code>llama_sampler_i</code>（name/accept/apply/reset/clone/free，均除 apply 外可为 NULL）+ 上下文指针，用户可完全自定义采样器。</p>
+<ul class="api-list">
+  <li><b>接口镜像函数</b>：<code>llama_sampler_init(iface, ctx)</code>、<code>llama_sampler_name / accept / apply / reset / clone / free</code>。注意：已加入链的 sampler 不得单独 free（链持有所有权）。</li>
+  <li><b>采样链</b>：<code>llama_sampler_chain_init / chain_add / chain_get / chain_n / chain_remove</code>（remove 后所有权归还调用方；chain_get 传 -1 返回链本身，可用于类型检测）。</li>
+  <li><b>内置采样器</b>（均以 <code>llama_sampler_init_*</code> 工厂函数创建）：
+    <table>
+      <tr><th>采样器</th><th>说明</th></tr>
+      <tr><td><code>greedy</code></td><td>贪心（argmax）</td></tr>
+      <tr><td><code>dist(seed)</code></td><td>按分布随机采样，<code>LLAMA_DEFAULT_SEED</code> = 随机种子</td></tr>
+      <tr><td><code>top_k / top_p / min_p / typical / top_n_sigma</code></td><td>截断类（含对应论文引用）</td></tr>
+      <tr><td><code>temp / temp_ext</code></td><td>温度缩放 / 动态温度（熵自适应）</td></tr>
+      <tr><td><code>xtc</code></td><td>XTC 排除式采样</td></tr>
+      <tr><td><code>mirostat / mirostat_v2</code></td><td>困惑度自适应采样 v1/v2</td></tr>
+      <tr><td><code>grammar / grammar_lazy_patterns</code></td><td>GBNF 语法约束（懒触发版支持触发词/模式/触发 token）；旧 lazy 版已废弃</td></tr>
+      <tr><td><code>penalties</code></td><td>重复/频率/存在惩罚</td></tr>
+      <tr><td><code>dry</code></td><td>DRY 重复惩罚</td></tr>
+      <tr><td><code>adaptive_p</code></td><td>自适应概率目标采样（EMA 机制，选择型采样器，须置于链尾）</td></tr>
+      <tr><td><code>logit_bias</code></td><td>logit 偏置</td></tr>
+      <tr><td><code>infill</code></td><td>infilling 专用（置于 top_k+top_p 之后，优先 EOG、合并同前缀概率）</td></tr>
+    </table>
+  </li>
+  <li><b>便捷入口</b>：<code>llama_sampler_sample(smpl, ctx, idx)</code>——从第 idx 个输出取 logits→应用采样链→accept→返回 token；<code>llama_sampler_get_seed()</code> 返回有效种子。</li>
+  <li><b>[EXPERIMENTAL] 后端采样接口</b>：<code>llama_sampler_i</code> 中的 <code>backend_init / backend_apply / backend_accept / backend_set_input</code>，将采样逻辑编译进 ggml 计算图（GPU 上执行）；另有 <code>llama_set_sampler(ctx, seq_id, smpl)</code> 按序列挂载采样器，及 <code>llama_sampler_data</code>（logits/probs/sampled/candidates 张量组）。</li>
+  <li>头文件内附完整<b>示例用法注释</b>（链构建 + 解码循环 + free，1197–1227 行）。</li>
+</ul>
+
+<h3>6.15 模型分片路径工具 <span class="line-ref">（1493–1505 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_split_path()</code>：由前缀 + 序号/总数生成分片文件名。</li>
+  <li><code>llama_split_prefix()</code>：仅当序号/总数匹配时从分片路径提取前缀。</li>
+</ul>
+
+<h3>6.16 日志 <span class="line-ref">（1507–1514 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_print_system_info()</code>：打印编译/系统信息。</li>
+  <li><code>llama_log_set / llama_log_get</code>：全局日志回调（未设置则输出 stderr；<b>非线程安全</b>）。</li>
+</ul>
+
+<h3>6.17 性能统计 <span class="line-ref">（1516–1550 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_perf_context_data</code>：加载/prompt 处理/生成耗时（ms）及 token 计数、图重用次数；<code>llama_perf_context / _print / _reset</code>。</li>
+  <li><code>llama_perf_sampler_data</code>：采样耗时与次数；<code>llama_perf_sampler / _print / _reset</code>（仅对链式采样器有效）。</li>
+  <li><code>llama_memory_breakdown_print()</code>：按设备打印内存占用分解。</li>
+  <li>注释提示：第三方应用建议自行测量，这些接口主要服务于官方示例/工具。</li>
+</ul>
+
+<h3>6.18 训练（fine-tuning）<span class="line-ref">（1552–1583 行）</span></h3>
+<ul class="api-list">
+  <li><code>llama_opt_param_filter</code>：筛选可训练张量的回调；<code>llama_opt_param_filter_all()</code> 全选实现。</li>
+  <li><code>llama_opt_params</code>：训练上下文尺寸、参数筛选回调、优化器参数回调（复用 ggml-opt）、优化器类型。</li>
+  <li><code>llama_opt_init()</code> + <code>llama_opt_epoch()</code>：基于 ggml-opt 的训练循环（数据集、训练/评估结果、epoch 回调）。</li>
+</ul>
+
+<h2 id="compat">7. 废弃（Deprecated）与向后兼容机制</h2>
+<p>该头文件体现了一次大规模 API 重命名（"llama_verb → llama_object_verb" 风格），旧名通过 <code>DEPRECATED()</code> 宏保留编译期警告与迁移提示：</p>
+<table>
+  <tr><th>旧 API</th><th>新 API</th><th>类别</th></tr>
+  <tr><td><code>llama_load_model_from_file</code></td><td><code>llama_model_load_from_file</code></td><td>模型加载</td></tr>
+  <tr><td><code>llama_free_model</code></td><td><code>llama_model_free</code></td><td>模型释放</td></tr>
+  <tr><td><code>llama_new_context_with_model</code></td><td><code>llama_init_from_model</code></td><td>上下文创建</td></tr>
+  <tr><td><code>llama_n_ctx_train / n_embd / n_layer / n_head / n_vocab</code></td><td><code>llama_model_* / llama_vocab_n_tokens</code></td><td>属性查询</td></tr>
+  <tr><td><code>llama_token_get_text/score/attr、llama_token_bos/eos/...</code></td><td><code>llama_vocab_*</code></td><td>词表</td></tr>
+  <tr><td><code>llama_get_state_size / copy_state_data / set_state_data / load/save_session_file</code></td><td><code>llama_state_*</code></td><td>状态</td></tr>
+  <tr><td><code>llama_sampler_init_grammar_lazy</code></td><td><code>llama_sampler_init_grammar_lazy_patterns</code></td><td>采样</td></tr>
+</table>
+<p>此外还有显式标注 <b>[EXPERIMENTAL]</b> 的接口（KV 量化、后端采样、<code>llama_params_fit</code> 相关缓冲约定等），提示可能变化；<code>defrag_thold</code> 已标 [DEPRECATED]。</p>
+
+<h2 id="lifecycle">8. 典型使用生命周期</h2>
+<pre><code>llama_backend_init();                          // 1. 初始化后端
+struct llama_model_params mp = llama_model_default_params();
+struct llama_model * model = llama_model_load_from_file("model.gguf", mp);   // 2. 加载模型
+struct llama_context_params cp = llama_context_default_params();
+struct llama_context * ctx = llama_init_from_model(model, cp);              // 3. 创建上下文
+
+const llama_vocab * vocab = llama_model_get_vocab(model);                   // 4. 词表与分词
+llama_tokenize(vocab, prompt, len, tokens, n_max, true, true);
+
+struct llama_batch batch = llama_batch_init(n_tokens, 0, 1);                // 5. 组装 batch
+/* 填充 token / pos / logits 标志 */
+llama_decode(ctx, batch);                                                   // 6. 推理
+
+struct llama_sampler * chain = llama_sampler_chain_init(sparams);           // 7. 采样链
+llama_sampler_chain_add(chain, llama_sampler_init_top_k(50));
+llama_sampler_chain_add(chain, llama_sampler_init_temp(0.8));
+llama_sampler_chain_add(chain, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+llama_token id = llama_sampler_sample(chain, ctx, -1);                      // 8. 采样
+
+llama_get_logits_ith(ctx, -1);  /* ... 反分词、输出 ... */
+
+llama_sampler_free(chain);                                                  // 9. 释放
+llama_batch_free(batch);
+llama_free(ctx);
+llama_model_free(model);
+llama_backend_free();</code></pre>
+
+<h2 id="summary">9. 总结与观察</h2>
+<table>
+  <tr><th>维度</th><th>观察</th></tr>
+  <tr><td>接口规模</td><td>约 220+ 个导出函数、20+ 枚举/结构体，覆盖从模型文件管理到训练的全链路。</td></tr>
+  <tr><td>抽象层次</td><td>完全建立在 GGML 之上（张量、后端、调度、线程池、优化器、GGUF），本身只做"模型级"编排。</td></tr>
+  <tr><td>内存/状态模型</td><td>以 <code>llama_memory_t</code> 统一抽象 KV/递归/SWA 缓存；状态可按上下文或单序列粒度导出/恢复，支持会话文件持久化。</td></tr>
+  <tr><td>多序列与并行</td><td><code>llama_batch</code> 原生支持一 token 属多序列、最多 <code>llama_max_parallel_sequences()</code> 路并行；多 GPU 支持 layer/row/tensor 级切分。</td></tr>
+  <tr><td>演进趋势</td><td>① 采样正从主机端 <code>llama_token_data_array</code> 迁移到<b>后端（计算图内）采样</b>；② 旧 API 正被对象化新名替代；③ 对 encoder-decoder、递归、混合、扩散模型的统一支持日益明显（<code>llama_encode/decode</code> 分离即是标志）。</td></tr>
+  <tr><td>稳定性提示</td><td>API 分四级：稳定（默认）、[EXPERIMENTAL]（可变）、DEPRECATED（保留兼容）、移除（注释保留的 ftype）。</td></tr>
+  <tr><td>易用性设计</td><td>默认参数工厂函数、能力探测函数、<code>llama_params_fit</code> 自动显存适配、头文件内采样示例注释，显著降低接入门槛。</td></tr>
+</table>
+
+<p class="meta" style="margin-top:40px; border-top:1px solid var(--border); padding-top:12px;">
+  本报告基于 <code>include/llama.h</code>（1589 行）源码静态分析生成；行号引用对应源文件当前版本。
+</p>
+
+</body>
+</html>

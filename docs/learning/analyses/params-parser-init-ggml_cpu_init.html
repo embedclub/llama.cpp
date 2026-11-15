@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>分析：为什么 common_params_parser_init 会调用 ggml_cpu_init</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 24px; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.5em; border-bottom: 2px solid #2b6cb0; padding-bottom: 8px; }
+  h2 { font-size: 1.2em; margin-top: 2em; }
+  code, .mono { font-family: "SF Mono", Menlo, monospace; font-size: 0.92em; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
+  .chain span { background: #e0f2fe; border: 1px solid #7dd3fc; border-radius: 6px; padding: 3px 10px; font-family: "SF Mono", Menlo, monospace; font-size: 0.82em; }
+  .chain b { color: #64748b; font-weight: normal; }
+  .arker { color: #b45309; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.9em; }
+  th, td { border: 1px solid #cbd5e1; padding: 6px 10px; text-align: left; }
+  th { background: #f1f5f9; }
+  .conclusion { background: #ecfdf5; border-left: 4px solid #10b981; padding: 12px 16px; border-radius: 4px; }
+  .tidbit { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 4px; }
+  .goodk { font-size: 0.8em; color: #94a3b8; margin-top: 3em; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>为什么 <code>common_params_parser_init</code> 会调用 <code>ggml_cpu_init</code></h1>
+<p><em>分析日期 2026-11-10 · 仓库 local_agentspace/llama.cpp（dylib 构建, GGML_BACKEND_DL=OFF）· 已用 lldb 实证</em></p>
+
+<h2>TL;DR</h2>
+<div class="conclusion">
+<p><code>common_params_parser_init</code> 在注册 <code>--rpc</code> 选项前要判断「RPC 后端是否可用」（<code>llama_supports_rpc()</code>，arg.cpp:2204）。这次查询是<b>整个进程第一次触碰后端注册表</b>——而注册表是<b>惰性单例</b>：谁先查，谁来承担一次性的「把所有已编译后端注册进来」的代价，其中就包括 CPU 后端的注册函数 <code>ggml_backend_cpu_reg()</code>，它的第一行便强制执行 <code>ggml_cpu_init()</code>。所以参数解析器只是「最早的倒霉触点」，真正的因果是：<b>后端注册表懒初始化 + CPU 后端注册函数自带初始化契约</b>。</p>
+</div>
+
+<h2>完整调用链（lldb 实测回溯，llama-cli --help）</h2>
+<div class="chain">
+<span>main (cli.cpp:353)</span><b>→</b>
+<span>common_params_parse (arg.cpp:885)</span><b>→</b>
+<span>common_params_parser_init (arg.cpp:989)</span><b>→</b>
+<span>if (llama_supports_rpc()) (arg.cpp:2204)</span><b>→</b>
+<span>ggml_backend_reg_by_name("RPC") (src/llama.cpp:840)</span><b>→</b>
+<span>ggml_backend_reg_count (ggml-backend-reg.cpp:298)</span><b>→</b>
+<span class="arker">get_reg() 首次构造单例 (ggml-backend-reg.cpp:274)</span><b>→</b>
+<span class="arker">register_backend(ggml_backend_cpu_reg()) (ggml-backend-reg.cpp:165)</span><b>→</b>
+<span class="arker">ggml_cpu_init (ggml-cpu.cpp:692 → ggml-cpu.c:3697)</span>
+</div>
+
+<h2>拆解三层「为什么」</h2>
+
+<h3>1. 参数解析器为什么会碰后端注册表？—— 条件式选项注册</h3>
+<p><code>common_params_parser_init</code> 不是只会填默认值，它还要把每个选项按当前程序能力<b>按需添加</b>。arg.cpp:2204 处：</p>
+<pre><code>if (llama_supports_rpc()) {      // arg.cpp:2204
+    add_opt(common_arg(
+        {"--rpc"}, "SERVERS",
+        "comma separated list of RPC servers (host:port)",
+        ...
+// llama.cpp:840
+bool llama_supports_rpc(void) {
+    return ggml_backend_reg_by_name("RPC") != nullptr;
+}
+</code></pre>
+<p>这是为了 <code>--help</code> 输出诚实：RPC 不可用时根本不该出现这个选项。判断「可用性」的唯一途径 = 查后端注册表。</p>
+
+<h3>2. 为什么一次查询会触发 CPU 后端注册？—— 惰性注册表单例</h3>
+<p><code>ggml-backend-reg.cpp:273</code>：注册表是<b>函数级 static</b>，第一次有人调用 <code>ggml_backend_reg_count / dev_count / reg_by_name…</code> 时才构造：</p>
+<pre><code>static ggml_backend_registry & get_reg() {
+    static ggml_backend_registry reg;    // 第一次调用才构造
+    return reg;
+}
+// 构造函数里（GGML_USE_CPU 分支，ggml-backend-reg.cpp:165）
+register_backend(ggml_backend_cpu_reg());   // ← 就是它
+</code></pre>
+<p>构造一次就要枚举所有编译进来的后端（本 build 仅 CPU，因 METAL=OFF），把它们的设备逐个登记。<b>"查询注册表内容"必须先"构造注册表内容"</b>，二者不可拆分。</p>
+
+<h3>3. 为什么 CPU 后端注册函数要调 <code>ggml_cpu_init</code>？—— 注册即保证可用</h3>
+<p><code>ggml-cpu.cpp:690</code>：</p>
+<pre><code>ggml_backend_reg_t ggml_backend_cpu_reg() {
+    // init CPU feature detection
+    ggml_cpu_init();     // ← ggml-cpu.cpp:692，注释写明动机
+    static struct ggml_backend_reg ggml_backend_cpu_reg = { ... };
+    return &amp;ggml_backend_cpu_reg;
+}
+</code></pre>
+<p>契约：任何拿到 CPU 后端句柄的人，都可以立即安全地查询 features、创建 backend、跑算子——不会遇到未初始化的查找表或特性标志。<code>ggml_cpu_init</code> 本身是<b>幂等</b>的（<code>static bool is_first_call</code> + 临界区，ggml-cpu.c:3705–3709），所以在 backend init/close（ggml-cpu.cpp:219/530）、reg（692）等入口重复调用完全安全，属于防御式冗余。</p>
+
+<h2><code>ggml_cpu_init</code> 到底初始化了什么（ggml-cpu.c:3697）</h2>
+<table>
+<tr><th>动作</th><th>说明</th></tr>
+<tr><td><code>ggml_init/ggml_free</code> 空上下文</td><td>顺手把 <code>ggml_time</code> 计时器体系初始化掉</td></tr>
+<tr><td>32–64K 项 fp16 查找表</td><td><code>ggml_table_f32_f16</code>、GELU / QuickGELU 预计算表 —— 把运行时的毫秒级开销挪到启动阶段，避免计入首 token 延迟</td></tr>
+<tr><td>E8M0 half 表（256 项）</td><td>服务块式量化格式（MX 系列）的快速转换</td></tr>
+<tr><td>CPU 特性探测结果</td><td><code>gFeatures</code>（SSE/AVX/NEON/DOTPROD…，初始化点即 <code>ggml_cpu_init</code>，见 simd-mappings.h:116）。之后 <code>ggml_cpu_has_*</code>/features 列表全靠它</td></tr>
+<tr><td>OpenMP 环境调优</td><td>设 <code>KMP_BLOCKTIME=200</code>（本 build OPENMP=OFF，不生效）</td></tr>
+</table>
+
+<div class="tidbit">
+<h3>几点对学习计划有用的后续推论</h3>
+<ul>
+<li><b>谁先来谁付账</b>：惰性单例的全局初始化成本记在「第一个触碰者」头上。你在调试器里看到的调用栈，有时只是时序巧合——换一个入口（如直接跑 server、测 --devices）栈顶全变，底层原因相同。</li>
+<li><b>对功耗基准的意义</b>：这份一次性初始化发生在解析参数阶段，<b>不需要</b>从你的 warmup/测量窗口里剔除——它早就跑完了；但若用 Instruments 观察启动阶段，看到大表初始化耗时属于正常现象（M2 热点榜分析启动路径时会再见到它）。</li>
+<li><b>缩小断点的技巧</b>：想在调试期避开这次「顺路初始化」，可把断点设在 <code>ggml_graph_compute</code> / 具体算子入口，而不是 <code>ggml_cpu_init</code> 这种幂等初始化入口。</li>
+<li>这正是 P1「调用链地图」要训练的肌肉：不是记住这栈，而是记住<b>三个一问</b>——查询为什么发生（条件注册）？查询为什么被动到（惰性单例）？被调方为什么要自己初始化（注册即契约）？</li>
+</ul>
+</div>
+
+<h2>关键文件:行号索引</h2>
+<table>
+<tr><th>位置</th><th>内容</th></tr>
+<tr><td><code>common/arg.cpp:2204</code></td><td><code>if (llama_supports_rpc())</code> —— 触发点</td></tr>
+<tr><td><code>common/arg.cpp:989</code></td><td><code>common_params_parser_init</code> 定义</td></tr>
+<tr><td><code>src/llama.cpp:840</code></td><td><code>llama_supports_rpc → ggml_backend_reg_by_name("RPC")</code></td></tr>
+<tr><td><code>ggml/src/ggml-backend-reg.cpp:273,298</code></td><td>惰性单例 <code>get_reg()</code> / 首次计数触发构造</td></tr>
+<tr><td><code>ggml/src/ggml-backend-reg.cpp:165</code></td><td>构造函数中注册 CPU 后端</td></tr>
+<tr><td><code>ggml/src/ggml-cpu/ggml-cpu.cpp:692</code></td><td><code>ggml_backend_cpu_reg</code> 首行调 <code>ggml_cpu_init</code></td></tr>
+<tr><td><code>ggml/src/ggml-cpu/ggml-cpu.cpp:219</code></td><td><code>ggml_backend_cpu_init</code> 中的又一个调用点（幂等冗余）</td></tr>
+<tr><td><code>ggml/src/ggml-cpu/ggml-cpu.cpp:528</code></td><td><code>ggml_backend_cpu_get_features</code> 的 lambda 内再调一次（幂等）</td></tr>
+<tr><td><code>ggml/src/ggml-cpu/ggml-cpu.c:3697</code></td><td><code>ggml_cpu_init</code> 实现（查找表 / 时间初始化 / <code>is_first_call</code>）</td></tr>
+</table>
+
+<p class="goodk">验证方式：lldb 在 <code>ggml_cpu_init</code> 下断点跑 <code>llama-cli --help</code>，回溯帧 #1–#10 与上述链条一一对应（2026-11-10，Apple clang 21, arm64）。</p>
+</body>
+</html>
