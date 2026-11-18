@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ctx_cli.generate_completion 推理实现分析</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d1d9e0;
+    --accent: #0969da;
+    --code-bg: #f6f8fa;
+    --card-bg: #fafbfc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.7;
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  h1 { border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+  h2 { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 2.2em; }
+  h3 { margin-top: 1.6em; }
+  code {
+    font-family: "SF Mono", Consolas, "Courier New", monospace;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 0.86em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.92em; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); }
+  .meta { color: var(--muted); font-size: 0.92em; }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .card b { color: var(--fg); }
+  .flow {
+    background: #fff8e1;
+    border: 1px dashed #b8860b;
+    border-radius: 8px;
+    padding: 14px 18px;
+  }
+  .line-ref { color: var(--muted); font-size: 0.85em; }
+  ul, ol { padding-left: 24px; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<h1><code>ctx_cli.generate_completion</code> 推理实现分析</h1>
+<p class="meta">
+  项目：<code>llama.cpp</code>（ggml-org）&nbsp;|&nbsp;
+  分析对象：<code>tools/cli/cli.cpp</code> 中的 <code>cli_context::generate_completion()</code>&nbsp;|&nbsp;
+  报告日期：2026-11-18
+</p>
+<p class="meta">基于本仓库当前 checkout 的源码；文中文件与行号均对应当前版本。</p>
+
+<h2>1. 结论先行</h2>
+<p><code>cli_context::generate_completion()</code> 定义在 <code>tools/cli/cli.cpp:75</code>。它<b>本身并不执行神经网络推理</b>，而是一个"进程内客户端"：</p>
+<ol>
+  <li>把当前对话历史套用聊天模板，得到最终 prompt；</li>
+  <li>把 prompt 封装成一个 <code>server_task</code>（类型 <code>SERVER_TASK_TYPE_COMPLETION</code>）投递到 <code>server_context</code> 的任务队列；</li>
+  <li>以<b>流式</b>方式从结果队列消费 <code>server_task_result</code>，把增量文本打印到终端，最后返回完整回复。</li>
+</ol>
+<p>真正的推理发生在 <code>main()</code> 里另起的一个线程中：该线程调用 <code>ctx_server.start_loop()</code>，由 server 的调度循环完成分词、slot 调度、<code>llama_decode()</code>、采样和结果回传。</p>
+<p>因此，<code>generate_completion</code> 的实现本质上是 <b>"生产者 + 消费者"</b>：生产一个任务，消费一串结果。它完整复用了 <code>llama-server</code> 的 slot / batch / KV cache / 采样 / chat parser 基础设施，只是省掉了 HTTP 层。</p>
+
+<div class="flow">
+<b>全链路概览</b>
+<pre><code>CLI 主线程                           推理线程 (start_loop)
+-----------                          ---------------------
+format_chat()                        从 queue_tasks 取任务
+  ↓                                   process_single_task()
+构造 server_task                       tokenize_cli_input()
+  ↓                                     ↓
+rd.post_task() ─────────────────────→ launch_slot_with_task()（初始化采样器）
+                                        ↓
+                                     update_slots()（组装 batch）
+                                        ↓
+                                     llama_decode()（CPU/GPU 前向）
+                                        ↓
+                                     common_sampler_sample()（采样）
+                                        ↓
+                                     common_token_to_piece()（反分词）
+                                        ↓
+                                     process_token()（停词/UTF-8/停止条件）
+                                        ↓
+rd.next() ←────────────────────────  queue_results.send()（partial/final）
+  ↓
+打印 content_delta / reasoning_content_delta
+  ↓ （循环直到 final）
+返回完整文本 + timings</code></pre>
+</div>
+
+<h2>2. 组件与线程模型</h2>
+<table>
+  <tr><th>组件</th><th>作用</th></tr>
+  <tr><td><code>cli_context</code></td><td>CLI 侧状态：<code>server_context ctx_server</code>、<code>json messages</code>、<code>input_files</code>、默认 <code>task_params</code>。见 <code>tools/cli/cli.cpp:47-217</code></td></tr>
+  <tr><td>CLI 主线程</td><td>读取用户输入、维护消息历史、调用 <code>generate_completion</code>、打印流式结果。<code>main()</code> 位于 <code>tools/cli/cli.cpp:338</code></td></tr>
+  <tr><td>推理线程</td><td><code>main()</code> 中 <code>std::thread</code> 启动，执行 <code>ctx_server.start_loop()</code>（<code>cli.cpp:388-390</code>）</td></tr>
+  <tr><td><code>server_context</code> / <code>server_context_impl</code></td><td>持有 model、<code>llama_context</code>、vocab、slots、任务/结果队列，并注册回调（<code>tools/server/server-context.cpp:978-986</code>）</td></tr>
+  <tr><td><code>server_queue</code></td><td>任务队列 <code>queue_tasks</code>，<code>post()</code> 加锁入队并 <code>notify_one</code>（<code>tools/server/server-queue.cpp:22-39</code>）</td></tr>
+  <tr><td><code>server_response_reader</code></td><td>一次请求的句柄：注册等待的 task id、<code>next()</code> 轮询结果、把原始 chunk 解析成 chat diff、析构时取消未完成任务（<code>tools/server/server-queue.h:164-205</code>、<code>server-queue.cpp:343-450</code>）</td></tr>
+  <tr><td><code>server_response</code></td><td>结果队列 <code>queue_results</code>，<code>send()</code> 入队并唤醒，<code>recv_with_timeout()</code> 阻塞等待（<code>server-queue.cpp:289-337</code>）</td></tr>
+  <tr><td><code>server_slot</code></td><td>一条并行序列的运行时状态：prompt tokens、已生成 token、采样器、状态机。<code>update_batch()</code> 在 <code>server-context.cpp:332</code></td></tr>
+</table>
+<p>关键点：CLI 与推理不在同一线程。二者通过两个带互斥锁/条件变量的队列通信，<code>generate_completion</code> 只是消费者的一端。</p>
+
+<h2>3. 逐步代码分析</h2>
+
+<h3>3.1 获取 response reader</h3>
+<pre><code>// tools/cli/cli.cpp:75-77
+std::string generate_completion(result_timings &amp; out_timings) {
+    server_response_reader rd = ctx_server.get_response_reader();
+    auto chat_params = format_chat();</code></pre>
+<p><code>get_response_reader()</code> 返回一个绑定到该 <code>server_context</code> 的读者：</p>
+<pre><code>// tools/server/server-context.cpp:3062-3064
+server_response_reader get_response_reader() {
+    return server_response_reader(queue_tasks, queue_results, HTTP_POLLING_SECONDS);
+}</code></pre>
+<p><code>HTTP_POLLING_SECONDS = 1</code>（<code>server-context.cpp:36</code>），即 <code>next()</code> 每秒轮询一次，用来检查 <code>should_stop</code>（Ctrl+C）。</p>
+
+<h3>3.2 应用聊天模板</h3>
+<p><code>format_chat()</code>（<code>cli.cpp:197-216</code>）把 <code>messages</code> 转成模板输入，并调用 <code>common_chat_templates_apply()</code>：</p>
+<pre><code>// tools/cli/cli.cpp:201-215
+common_chat_templates_inputs inputs;
+inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
+inputs.use_jinja             = chat_params.use_jinja;
+inputs.add_generation_prompt = true;
+inputs.reasoning_format      = COMMON_REASONING_FORMAT_DEEPSEEK;
+...
+return common_chat_templates_apply(chat_params.tmpls.get(), inputs);</code></pre>
+<p>返回的 <code>common_chat_params</code> 同时包含：最终 <code>prompt</code> 字符串、模板自带的 <code>parser</code>、<code>generation_prompt</code>、<code>thinking_start_tag</code> / <code>thinking_end_tag</code>，后续用于流式 chat diff 解析和 reasoning budget。</p>
+
+<h3>3.3 构造并投递任务</h3>
+<pre><code>// tools/cli/cli.cpp:80-113（节选）
+server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
+task.id         = rd.get_new_id();
+task.index      = 0;
+task.params     = defaults;           // copy
+task.cli_prompt = chat_params.prompt; // copy
+task.cli_files  = input_files;        // copy
+task.cli        = true;
+
+task.params.chat_parser_params = common_chat_parser_params(chat_params);
+task.params.chat_parser_params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+if (!chat_params.parser.empty()) {
+    task.params.chat_parser_params.parser.load(chat_params.parser);
+}
+
+// reasoning budget sampler
+if (!chat_params.thinking_end_tag.empty()) {
+    const llama_vocab * vocab = llama_model_get_vocab(
+        llama_get_model(ctx_server.get_llama_context()));
+    task.params.sampling.reasoning_budget_tokens = reasoning_budget;
+    task.params.sampling.generation_prompt       = chat_params.generation_prompt;
+    ...
+    task.params.sampling.reasoning_budget_end =
+        common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
+    ...
+}
+
+rd.post_task({std::move(task)});</code></pre>
+<p>注意三点：</p>
+<ul>
+  <li><code>task.cli = true</code> 且只填 <code>cli_prompt</code>、不填 <code>tokens</code>，因此分词被<b>推迟到推理线程</b>执行（因为 vocab / mtmd context 只存在于 <code>server_context</code> 内部）。</li>
+  <li><code>defaults</code> 在构造 <code>cli_context</code> 时设置：<code>stream = true</code>、<code>timings_per_token = true</code>，保证逐 token 流式返回并携带耗时（<code>cli.cpp:59-73</code>）。</li>
+  <li><code>post_task()</code> 会注册等待 id、为流式解析创建状态，然后入队：</li>
+</ul>
+<pre><code>// tools/server/server-queue.cpp:343-350
+void server_response_reader::post_task(server_task &amp;&amp; task, bool front) {
+    GGML_ASSERT(id_tasks.empty() &amp;&amp; "post_task() can only be called once per reader");
+    GGML_ASSERT(!task.is_parent() &amp;&amp; "not supported, use post_tasks() instead");
+    task.index = 0;
+    id_tasks.insert(task.id);
+    states.push_back(task.create_state());
+    queue_results.add_waiting_task_id(task.id);
+    queue_tasks.post(std::move(task), front);
+}</code></pre>
+<p><code>create_state()</code> 返回 <code>task_result_state</code>，其中保存了 chat parser 参数和增量解析状态，供后续 <code>next()</code> 生成 <code>oaicompat_msg_diffs</code>。</p>
+
+<h3>3.4 推理线程事件循环</h3>
+<p><code>main()</code> 中的推理线程：</p>
+<pre><code>// tools/cli/cli.cpp:388-390
+std::thread inference_thread([&amp;ctx_cli]() {
+    ctx_cli.ctx_server.start_loop();
+});</code></pre>
+<p><code>server_context::start_loop()</code> 委托给 <code>server_queue::start_loop()</code>（<code>server-context.cpp:3078-3081</code>），其主循环（<code>server-queue.cpp:125-209</code>）为：</p>
+<ol>
+  <li>反复从 <code>queue_tasks</code> 取任务，逐个调用 <code>callback_new_task</code>；</li>
+  <li>队列排空后调用 <code>callback_update_slots</code>（即 <code>update_slots()</code>），驱动本轮推理；</li>
+  <li>再进入等待：有新任务、需要休眠、或终止时退出。</li>
+</ol>
+<p>回调在 <code>init()</code> 中注册：</p>
+<pre><code>// tools/server/server-context.cpp:978-983
+queue_tasks.on_new_task([this](server_task &amp;&amp; task) {
+    process_single_task(std::move(task));
+});
+queue_tasks.on_update_slots([this]() {
+    update_slots();
+});</code></pre>
+<p><code>process_single_task()</code> 对完成类任务的处理（<code>server-context.cpp:1833-1896</code>）：</p>
+<ul>
+  <li>CLI 任务先分词：<code>tokenize_cli_input(task)</code>（<code>1738</code>）→ <code>tokenize_input_prompts(vocab, mctx, prompt, true, true)</code>（<code>tools/server/server-common.cpp:793</code>）→ <code>common_tokenize</code> → <code>llama_tokenize</code>。</li>
+  <li>选 slot：<code>get_slot_by_id()</code> 或 <code>get_available_slot(task)</code>；没有空闲 slot 则 <code>defer()</code> 稍后重试。</li>
+  <li><code>launch_slot_with_task()</code>（<code>1217</code>）：初始化采样器 <code>common_sampler_init(model, task.params.sampling)</code>（<code>1293</code>）；若启用后端采样则 <code>llama_set_sampler(ctx, slot.id, ...)</code>（<code>1314</code>）；把 task 移入 slot，状态置为 <code>SLOT_STATE_STARTED</code>。</li>
+</ul>
+
+<h3>3.5 <code>update_slots()</code>：组装 batch</h3>
+<p><code>update_slots()</code>（<code>server-context.cpp:2118</code>）是推理循环核心：</p>
+<ol>
+  <li>若所有 slot 空闲，直接返回。</li>
+  <li>投递一个 <code>SERVER_TASK_TYPE_NEXT_RESPONSE</code> 空任务（<code>2140-2142</code>；在 <code>process_single_task</code> 的 <code>1907-1910</code> 中不做任何事），用于让任务队列保持非空、循环在连续生成期间持续运转，而不是进入空闲等待。</li>
+  <li>需要时做 context shift（<code>2147-2204</code>）。</li>
+  <li><code>common_batch_clear(batch)</code> 开始新 batch（<code>2207</code>）。</li>
+  <li>对处于 <code>SLOT_STATE_GENERATING</code> 的 slot，把上一轮采样出的 token 加入 batch：</li>
+</ol>
+<pre><code>// tools/server/server-context.cpp:380-384（server_slot::update_batch）
+if (spec_draft.empty()) {
+    i_batch = batch.n_tokens;
+    common_batch_add(batch, sampled, prompt.tokens.pos_next(), { this-&gt;id }, true);
+}</code></pre>
+<p><code>common_batch_add()</code>（<code>common/common.cpp:1511</code>）把 token、pos、seq_id 和 <code>logits=true</code> 写入 <code>llama_batch</code>，因此只有新 token 需要输出 logits。</p>
+<ol start="6">
+  <li>对 <code>STARTED</code> / <code>PROCESSING_PROMPT</code> 的 slot，按 <code>n_batch</code> / <code>n_ubatch</code> 把 prompt token 分块加入 batch（<code>2240</code> 起），并处理是否复用缓存、是否创建 checkpoint 等。</li>
+  <li>执行解码（见下）。</li>
+</ol>
+
+<h3>3.6 调用 <code>llama_decode()</code></h3>
+<pre><code>// tools/server/server-context.cpp:2775-2788
+for (int32_t i = 0; i &lt; batch.n_tokens; i = i_next) {
+    const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
+    llama_batch batch_view = {
+        n_tokens,
+        batch.token    + i,
+        nullptr,
+        batch.pos      + i,
+        batch.n_seq_id + i,
+        batch.seq_id   + i,
+        batch.logits   + i,
+    };
+    const int ret = llama_decode(ctx, batch_view);
+    ...
+}</code></pre>
+<ul>
+  <li>返回 0 表示成功；<code>ret == 1</code> 表示 KV 无空位（代码会把 <code>n_batch</code> 减半重试或清理空闲 slot）；<code>ret == -1</code> 无效 batch；<code>ret &lt; -1</code> 计算错误（<code>2792-2839</code>）。</li>
+  <li>成功后 <code>i_next = i + n_tokens</code>，继续处理剩余 batch。</li>
+  <li>解码完成后，logits 已由 <code>llama_context::decode()</code> 拷回主存（<code>src/llama-context.cpp</code>）。</li>
+</ul>
+
+<h3>3.7 采样与反分词</h3>
+<p>解码成功后，对 <code>i_batch</code> 落在本次 chunk 范围内的 slot：</p>
+<pre><code>// tools/server/server-context.cpp:2900-2944（节选）
+slot.state = SLOT_STATE_GENERATING;
+
+const int tok_idx = slot.i_batch - i;
+llama_token id = common_sampler_sample(slot.smpl.get(), slot.ctx, tok_idx);
+slot.i_batch = -1;
+common_sampler_accept(slot.smpl.get(), id, true);
+
+slot.n_decoded += 1;
+...
+completion_token_output result;
+result.tok          = id;
+result.text_to_send = common_token_to_piece(slot.ctx, result.tok,
+                                            accept_special_token(slot, result.tok));
+
+if (!process_token(result, slot)) {
+    slot.print_timings();
+    send_final_response(slot);
+    metrics.on_prediction(slot);
+    slot.release();
+    continue;
+}</code></pre>
+<ul>
+  <li><code>common_sampler_sample()</code>（<code>common/sampling.cpp:526</code>）从第 <code>tok_idx</code> 个输出取 logits，依次应用采样链并返回选中的 token。</li>
+  <li><code>common_sampler_accept()</code>（<code>common/sampling.cpp:432</code>）把 token 记入采样器历史，供重复惩罚/语法等使用。</li>
+  <li><code>common_token_to_piece()</code>（<code>common/common.cpp:1572</code>）把 token id 转成文本片段。</li>
+</ul>
+
+<h3>3.8 <code>process_token()</code>：流式输出与停止条件</h3>
+<p><code>process_token()</code>（<code>server-context.cpp:1337-1466</code>）决定"是否继续生成"：</p>
+<ul>
+  <li>记录 <code>slot.sampled</code>、追加文本、<code>n_decoded</code> 计数；</li>
+  <li>UTF-8 完整性检查：一个中文/emoji 可能被拆成多个 token，未凑齐完整 UTF-8 前不发送（<code>1349</code>、<code>1385</code>）；</li>
+  <li>停止字符串检测 <code>find_stopping_strings()</code>（<code>1358</code>）；</li>
+  <li>上下文用尽（<code>1390</code>）、<code>n_predict</code> 预算（<code>1400</code>）、缩进/时间限制（<code>1407-1454</code>）；</li>
+  <li>EOS/EOG 检测 <code>llama_vocab_is_eog()</code>（<code>1456</code>）；</li>
+  <li>若仍继续且 <code>stream == true</code>，调用 <code>send_partial_response()</code>（<code>1381</code>）。</li>
+</ul>
+<p><code>send_partial_response()</code>（<code>1554-1592</code>）构造 <code>server_task_result_cmpl_partial</code>，写入 <code>content</code>、<code>tokens</code>、<code>timings</code>、<code>n_decoded</code> 等，然后 <code>queue_results.send()</code>。</p>
+
+<h3>3.9 结果回传与 reader 消费</h3>
+<p><code>server_response::send()</code>（<code>server-queue.cpp:319-332</code>）把结果放入 <code>queue_results</code>，并 <code>condition_results.notify_all()</code>。</p>
+<p>CLI 侧的 <code>rd.next()</code>（<code>server-queue.cpp:378-407</code>）循环：</p>
+<pre><code>server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, polling_interval_seconds);
+if (result == nullptr) {
+    if (should_stop()) return nullptr;   // Ctrl+C
+} else {
+    if (result-&gt;is_error()) { stop(); return result; }
+    if (!states.empty()) {
+        const size_t idx = result-&gt;index;
+        result-&gt;update(states[idx]);     // 生成 chat diff
+    }
+    if (result-&gt;is_stop()) received_count++;
+    return result;
+}</code></pre>
+<p><code>result-&gt;update()</code> 对 partial/final 都会调用 <code>task_result_state::update_chat_msg()</code>（<code>server-task.cpp:158</code>），用 <code>common_chat_parse()</code> 解析当前累计文本，再 <code>compute_diffs()</code> 得到本 chunk 的 <code>oaicompat_msg_diffs</code>。这就是 CLI 能拿到 <code>content_delta</code> / <code>reasoning_content_delta</code> 的原因。</p>
+
+<h3>3.10 CLI 侧的打印循环</h3>
+<pre><code>// tools/cli/cli.cpp:130-174（节选）
+while (result) {
+    if (should_stop()) break;
+    if (result-&gt;is_error()) { ... return curr_content; }
+
+    auto res_partial = dynamic_cast&lt;server_task_result_cmpl_partial *&gt;(result.get());
+    if (res_partial) {
+        out_timings = std::move(res_partial-&gt;timings);
+        for (const auto &amp; diff : res_partial-&gt;oaicompat_msg_diffs) {
+            if (!diff.content_delta.empty()) {
+                ...
+                curr_content += diff.content_delta;
+                console::log("%s", diff.content_delta.c_str());
+                console::flush();
+            }
+            if (!diff.reasoning_content_delta.empty()) {
+                console::log("%s", diff.reasoning_content_delta.c_str());
+                console::flush();
+            }
+        }
+    }
+
+    auto res_final = dynamic_cast&lt;server_task_result_cmpl_final *&gt;(result.get());
+    if (res_final) {
+        out_timings = std::move(res_final-&gt;timings);
+        break;
+    }
+    result = rd.next(should_stop);
+}
+g_is_interrupted.store(false);
+return curr_content;</code></pre>
+<ul>
+  <li>partial：累加并逐字打印，同时拿到每 token timings；</li>
+  <li>final：取最终 timings 并结束；最终响应在流模式下 <code>content</code> 为空（内容已在 partial 中发完），只带统计信息（<code>send_final_response</code>，<code>server-context.cpp:1594-1615</code>）。</li>
+</ul>
+
+<h3>3.11 收尾与取消</h3>
+<ul>
+  <li><code>server_response_reader</code> 析构时调用 <code>stop()</code>（<code>server-queue.cpp:431-450</code>）：移除等待 id；若任务未完成，投递 <code>SERVER_TASK_TYPE_CANCEL</code>（高优先级 <code>front=true</code>）取消剩余任务。</li>
+  <li><code>slot.release()</code> 把 slot 重新标记为空闲，并更新统计数据。</li>
+  <li><code>main()</code> 结束时调用 <code>ctx_server.terminate()</code> 并 <code>join</code> 推理线程（<code>cli.cpp:632-633</code>）。</li>
+</ul>
+
+<h2>4. 一次调用的时序</h2>
+<table>
+  <tr><th>步骤</th><th>线程</th><th>位置</th><th>动作</th></tr>
+  <tr><td>1</td><td>CLI</td><td><code>cli.cpp:77</code></td><td><code>format_chat()</code> 套模板得 prompt</td></tr>
+  <tr><td>2</td><td>CLI</td><td><code>cli.cpp:80-113</code></td><td>构造 <code>server_task</code> 并 <code>post_task</code></td></tr>
+  <tr><td>3</td><td>推理</td><td><code>server-queue.cpp:157</code></td><td><code>callback_new_task</code> → <code>process_single_task</code></td></tr>
+  <tr><td>4</td><td>推理</td><td><code>server-context.cpp:1738</code></td><td>CLI prompt 分词</td></tr>
+  <tr><td>5</td><td>推理</td><td><code>server-context.cpp:1217</code></td><td><code>launch_slot_with_task</code> 初始化 sampler/slot</td></tr>
+  <tr><td>6</td><td>推理</td><td><code>server-context.cpp:2118</code></td><td><code>update_slots</code> 组 batch</td></tr>
+  <tr><td>7</td><td>推理</td><td><code>server-context.cpp:2788</code></td><td><code>llama_decode</code></td></tr>
+  <tr><td>8</td><td>推理</td><td><code>server-context.cpp:2916</code></td><td><code>common_sampler_sample</code></td></tr>
+  <tr><td>9</td><td>推理</td><td><code>server-context.cpp:2937</code></td><td><code>common_token_to_piece</code></td></tr>
+  <tr><td>10</td><td>推理</td><td><code>server-context.cpp:1337</code></td><td><code>process_token</code> 判停/发 partial</td></tr>
+  <tr><td>11</td><td>CLI</td><td><code>server-queue.cpp:378</code></td><td><code>rd.next()</code> 收结果并解析 diff</td></tr>
+  <tr><td>12</td><td>CLI</td><td><code>cli.cpp:143-167</code></td><td>打印增量</td></tr>
+  <tr><td>13</td><td>推理</td><td><code>server-context.cpp:1594</code></td><td>满足停止条件后发 final</td></tr>
+  <tr><td>14</td><td>CLI</td><td><code>cli.cpp:168-171</code></td><td>收到 final，返回完整文本</td></tr>
+</table>
+
+<h2>5. 关键设计点</h2>
+<ol>
+  <li><b>进程内复用 server 基础设施</b><br>
+    <code>generate_completion</code> 没有自己的推理代码，而是复用 <code>server_context_impl</code> 的 slot 调度、batching、KV/内存管理、采样和 chat parser。CLI 相当于一个不带 HTTP 的客户端。</li>
+  <li><b>流式优先</b><br>
+    <code>defaults.stream = true</code>，每个 token 通过 <code>send_partial_response</code> 立即入队，主线程逐字打印；<code>timings_per_token = true</code> 让每个 partial 都带耗时统计。</li>
+  <li><b>原始 token → chat diff</b><br>
+    server 侧发出的是原始文本 chunk；reader 在 <code>update()</code> 中用 <code>common_chat_parse(..., is_partial=true)</code> 增量解析，算出 <code>content_delta</code> / <code>reasoning_content_delta</code> / 工具调用增量。这样 CLI 不必自己理解模板结构。</li>
+  <li><b>后端采样可选</b><br>
+    在 <code>launch_slot_with_task</code> 中，若满足条件（未开投机解码、未请求 probs），调用 <code>llama_set_sampler()</code> 让采样进入计算图/后端执行；否则在主机侧用 <code>common_sampler_sample()</code>。CLI 无需感知差异。</li>
+  <li><b>取消与中断</b><br>
+    <code>should_stop()</code> 通过 <code>g_is_interrupted</code> 原子标志传递 Ctrl+C；<code>next()</code> 每秒轮询一次；reader 析构会取消未完成任务，避免推理线程空转。</li>
+  <li><b>多 slot / 并发</b><br>
+    虽然 CLI 通常只有一个对话，但底层 <code>update_slots()</code> 支持多 slot 并行、按 <code>n_batch</code> 分块、把多个序列拼进同一个 <code>llama_batch</code>，与 <code>llama-server</code> 完全一致。</li>
+</ol>
+
+<h2>6. 关键代码位置速查</h2>
+<table>
+  <tr><th>主题</th><th>位置</th></tr>
+  <tr><td><code>generate_completion</code> 定义</td><td><code>tools/cli/cli.cpp:75</code></td></tr>
+  <tr><td>获取 reader / 套模板</td><td><code>tools/cli/cli.cpp:76-77</code>、<code>197-216</code></td></tr>
+  <tr><td>构造并投递任务</td><td><code>tools/cli/cli.cpp:80-113</code></td></tr>
+  <tr><td>CLI 打印循环</td><td><code>tools/cli/cli.cpp:130-174</code></td></tr>
+  <tr><td><code>main()</code> 与推理线程</td><td><code>tools/cli/cli.cpp:338</code>、<code>388-390</code></td></tr>
+  <tr><td>结果消费循环</td><td><code>tools/server/server-queue.cpp:378-407</code></td></tr>
+  <tr><td><code>post_task</code></td><td><code>tools/server/server-queue.cpp:343-351</code></td></tr>
+  <tr><td><code>start_loop</code></td><td><code>tools/server/server-queue.cpp:125-209</code></td></tr>
+  <tr><td>队列/结果发送</td><td><code>tools/server/server-queue.cpp:22-39</code>、<code>319-332</code></td></tr>
+  <tr><td>回调注册</td><td><code>tools/server/server-context.cpp:978-986</code></td></tr>
+  <tr><td><code>process_single_task</code></td><td><code>tools/server/server-context.cpp:1833</code></td></tr>
+  <tr><td>CLI 分词</td><td><code>tools/server/server-context.cpp:1738-1753</code></td></tr>
+  <tr><td><code>launch_slot_with_task</code></td><td><code>tools/server/server-context.cpp:1217</code></td></tr>
+  <tr><td>采样器初始化</td><td><code>tools/server/server-context.cpp:1290-1322</code></td></tr>
+  <tr><td><code>update_slots</code></td><td><code>tools/server/server-context.cpp:2118</code></td></tr>
+  <tr><td><code>server_slot::update_batch</code></td><td><code>tools/server/server-context.cpp:332-409</code></td></tr>
+  <tr><td><code>llama_decode</code> 调用</td><td><code>tools/server/server-context.cpp:2788</code></td></tr>
+  <tr><td>采样 + 反分词</td><td><code>tools/server/server-context.cpp:2914-2944</code></td></tr>
+  <tr><td><code>process_token</code></td><td><code>tools/server/server-context.cpp:1337-1466</code></td></tr>
+  <tr><td>发 partial / final</td><td><code>tools/server/server-context.cpp:1554-1592</code>、<code>1594-1615</code></td></tr>
+  <tr><td>chat diff 解析</td><td><code>tools/server/server-task.cpp:158</code>、<code>1382</code></td></tr>
+  <tr><td>reader 析构取消</td><td><code>tools/server/server-queue.cpp:431-450</code></td></tr>
+</table>
+
+<h2>7. 与 HTTP server 路径的关系</h2>
+<p><code>llama-server</code> 的 HTTP handler 也使用同一套 <code>server_response_reader</code> / <code>server_queue</code> / <code>update_slots</code> / <code>llama_decode</code> 流程，区别仅在于：</p>
+<ul>
+  <li>HTTP 路径在 HTTP 线程里先把 prompt 分词，再投递任务；CLI 则设置 <code>task.cli = true</code>，由推理线程分词。</li>
+  <li>HTTP 路径把结果序列化成 SSE/JSON 发回网络；CLI 直接把 <code>oaicompat_msg_diffs</code> 打印到终端。</li>
+  <li>两者共享 slot 调度、batching、采样、停止条件与取消机制。</li>
+</ul>
+<p>因此阅读 <code>generate_completion</code> 是理解 llama.cpp server 推理主循环的一个很好的切入点：它的调用链几乎就是整个 server 的推理骨架。</p>
+
+<h2>8. 总结</h2>
+<p><code>ctx_cli.generate_completion()</code> 是一个轻量的进程内客户端：</p>
+<ul>
+  <li><b>生产</b>：<code>format_chat()</code> → <code>server_task</code> → <code>post_task()</code>；</li>
+  <li><b>推理</b>：独立线程的 <code>start_loop()</code> → <code>process_single_task()</code> → <code>update_slots()</code> → <code>llama_decode()</code> → <code>common_sampler_sample()</code> → <code>common_token_to_piece()</code> → <code>process_token()</code>；</li>
+  <li><b>消费</b>：<code>rd.next()</code> → chat diff → 终端流式打印 → final 结束。</li>
+</ul>
+<p>它把"交互式命令行"与"高性能推理服务"解耦，通过任务/结果队列连接，既复用了 server 的全部能力，又保持了 CLI 代码的简洁。</p>
+
+</body>
+</html>
