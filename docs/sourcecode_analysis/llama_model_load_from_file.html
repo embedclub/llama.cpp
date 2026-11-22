@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llama_model_load_from_file 逐行梳理</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --text: #d7dae0;
+    --muted: #9aa3b2;
+    --accent: #6cb6ff;
+    --accent-2: #7ee787;
+    --border: #2a2f3a;
+    --code-bg: #12151b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .layout { display: flex; max-width: 1400px; margin: 0 auto; }
+  nav {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 280px; max-height: 100vh; overflow-y: auto;
+    padding: 24px 16px; border-right: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 13px;
+  }
+  nav h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 12px; }
+  nav a { display: block; color: var(--muted); text-decoration: none; padding: 5px 8px; border-radius: 6px; }
+  nav a:hover { color: var(--accent); background: var(--panel-2); }
+  main { flex: 1; min-width: 0; padding: 40px 48px 120px; }
+  h1 { font-size: 30px; line-height: 1.3; margin: 0 0 8px; color: #fff; }
+  h1 + .subtitle { color: var(--muted); margin-bottom: 32px; }
+  h2 { font-size: 23px; margin: 48px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: #fff; }
+  h3 { font-size: 18px; margin: 32px 0 12px; color: var(--accent); }
+  h4 { font-size: 15px; margin: 24px 0 8px; color: var(--accent-2); }
+  p { margin: 10px 0; }
+  ul, ol { padding-left: 24px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    background: var(--panel-2); padding: 1px 6px; border-radius: 4px; font-size: 13px; color: #ffd479;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 18px; overflow-x: auto; margin: 14px 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+  .cmt { color: #6a737d; }
+  .kw { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .fn { color: #d2a8ff; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: #fff; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  .note {
+    background: rgba(108,182,255,.08); border-left: 3px solid var(--accent);
+    padding: 10px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; color: #c9d4e3;
+  }
+  .warn {
+    background: rgba(255,180,80,.08); border-left: 3px solid #ffb450;
+    padding: 10px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; color: #e6d3b3;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px;
+    background: var(--panel-2); color: var(--accent); border: 1px solid var(--border);
+    font-family: monospace;
+  }
+  .callgraph { white-space: pre; font-family: monospace; font-size: 13px; color: var(--muted); }
+  @media (max-width: 980px) {
+    nav { display: none; }
+    main { padding: 24px 18px 80px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>目录</h2>
+  <a href="#s0">0. 一句话结论</a>
+  <a href="#s1">1. 公共 API 入口</a>
+  <a href="#s2">2. impl：参数校验与设备选择</a>
+  <a href="#s3">3. llama_model_load 编排</a>
+  <a href="#s4">4. llama_model_loader 构造</a>
+  <a href="#s5">5. arch / hparams / vocab / stats</a>
+  <a href="#s6">6. load_tensors</a>
+  <a href="#s7">7. create_tensor 与 buffer 选择</a>
+  <a href="#s8">8. load_all_data</a>
+  <a href="#s9">9. 错误处理与生命周期</a>
+  <a href="#s10">10. 关键数据结构</a>
+  <a href="#s11">11. 时序图</a>
+  <a href="#s12">12. 阅读建议</a>
+</nav>
+
+<main>
+<h1>llama_model_load_from_file 逐行梳理</h1>
+<div class="subtitle">
+  源码基线：本仓库当前检出（<code>src/llama.cpp</code>、<code>src/llama-model.cpp</code>、<code>src/llama-model-loader.cpp</code>、<code>src/llama-vocab.cpp</code>）。
+  行号对应当前工作区，格式 <code>文件:行号</code>。
+</div>
+
+<section id="s0">
+<h2>0. 一句话结论</h2>
+<p><code>llama_model_load_from_file()</code> 本身只是一个<strong>很薄的公共 API 包装</strong>，真正的工作在 <code>llama_model_load_from_file_impl()</code> 与 <code>llama_model_load()</code> 中完成：</p>
+<pre><code>llama_model_load_from_file()                       <span class="cmt">// src/llama.cpp:1163  公共入口</span>
+  └─ llama_model_load_from_file_impl()             <span class="cmt">// src/llama.cpp:931   参数校验 / 设备选择 / 生命周期</span>
+       └─ llama_model_load()                       <span class="cmt">// src/llama.cpp:874   加载流程编排</span>
+            ├─ llama_model_loader 构造             <span class="cmt">// src/llama-model-loader.cpp:510  GGUF 解析/分片/权重索引</span>
+            ├─ model.load_arch()                   <span class="cmt">// src/llama-model.cpp:683        识别模型架构</span>
+            ├─ model.load_hparams()                <span class="cmt">// src/llama-model.cpp:693        读取超参数</span>
+            ├─ model.load_vocab()                  <span class="cmt">// src/llama-model.cpp:2952       构建词表/分词器</span>
+            ├─ model.load_stats() + print_info()   <span class="cmt">// src/llama-model.cpp:678/8096   统计与打印</span>
+            └─ model.load_tensors()                <span class="cmt">// src/llama-model.cpp:2958       建张量/分配后端 buffer/搬运权重</span></code></pre>
+<p>整个加载过程可以概括为 <strong>“解析元数据 → 识别架构 → 读超参 → 建词表 → 建张量并绑定到设备 → 把权重数据搬到显存/内存”</strong>。</p>
+</section>
+
+<section id="s1">
+<h2>1. 公共 API 入口</h2>
+<p>声明（<code>include/llama.h:474-479</code>）：</p>
+<pre><code><span class="cmt">// Load a model from a file</span>
+<span class="cmt">// If the file is split into multiple parts, the file name must follow this pattern: &lt;name&gt;-%05d-of-%05d.gguf</span>
+LLAMA_API <span class="kw">struct</span> llama_model * llama_model_load_from_file(
+                         <span class="kw">const char</span> * path_model,
+          <span class="kw">struct</span> llama_model_params   params);</code></pre>
+<p>实现（<code>src/llama.cpp:1163</code>）：</p>
+<pre><code><span class="kw">struct</span> llama_model * llama_model_load_from_file(
+        <span class="kw">const char</span> * path_model,
+        <span class="kw">struct</span> llama_model_params params) {
+    std::vector&lt;std::string&gt; splits = {};                                   <span class="cmt">// 1166</span>
+    <span class="kw">return</span> llama_model_load_from_file_impl(                                 <span class="cmt">// 1167</span>
+        nullptr, nullptr, nullptr, path_model, splits, <span class="cmt">/*file*/</span> nullptr, params);
+}</code></pre>
+<p>要点：</p>
+<ol>
+  <li><code>splits</code> 传空 <code>vector</code>，表示“由 loader 自己按 <code>&lt;name&gt;-%05d-of-%05d.gguf</code> 规则推导分片文件名”。</li>
+  <li><code>metadata</code>、<code>set_tensor_data</code>、<code>file</code> 都传 <code>nullptr</code>，即“从磁盘文件加载”的标准路径。</li>
+</ol>
+<p>同一实现还被下面几个入口复用：</p>
+<table>
+  <tr><th>入口</th><th>位置</th><th>与标准路径的差异</th></tr>
+  <tr><td><code>llama_model_load_from_splits</code></td><td><code>src/llama.cpp:1170</code></td><td>调用方显式给出分片路径列表，<code>splits.front()</code> 作为主文件</td></tr>
+  <tr><td><code>llama_model_load_from_file_ptr</code></td><td><code>src/llama.cpp:1186</code></td><td>从已打开的 <code>FILE *</code> 加载，不传路径</td></tr>
+  <tr><td><code>llama_model_init_from_user</code></td><td><code>src/llama.cpp:1144</code></td><td>从外部 <code>gguf_context</code> + 回调构造，<code>use_mmap/use_extra_bufts</code> 强制关闭</td></tr>
+  <tr><td><code>llama_load_model_from_file</code>（已废弃）</td><td><code>src/llama.cpp:1157</code></td><td>直接转发到新 API</td></tr>
+</table>
+<p><code>llama_model_params</code> 默认值（<code>src/llama-model.cpp:9064</code>）：</p>
+<pre><code>llama_model_params llama_model_default_params() {
+    llama_model_params result = {
+        <span class="cmt">/*.devices                     =*/</span> nullptr,       <span class="cmt">// 自动选设备</span>
+        <span class="cmt">/*.tensor_buft_overrides       =*/</span> nullptr,
+        <span class="cmt">/*.n_gpu_layers                =*/</span> -1,            <span class="cmt">// 负数 = 全部层放 GPU</span>
+        <span class="cmt">/*.split_mode                  =*/</span> LLAMA_SPLIT_MODE_LAYER,
+        <span class="cmt">/*.main_gpu                    =*/</span> 0,
+        <span class="cmt">/*.tensor_split                =*/</span> nullptr,
+        <span class="cmt">/*.progress_callback           =*/</span> nullptr,
+        <span class="cmt">/*.progress_callback_user_data =*/</span> nullptr,
+        <span class="cmt">/*.kv_overrides                =*/</span> nullptr,
+        <span class="cmt">/*.vocab_only                  =*/</span> false,
+        <span class="cmt">/*.use_mmap                    =*/</span> true,
+        <span class="cmt">/*.use_direct_io               =*/</span> false,
+        <span class="cmt">/*.use_mlock                   =*/</span> false,
+        <span class="cmt">/*.check_tensors               =*/</span> false,
+        <span class="cmt">/*.use_extra_bufts             =*/</span> true,
+        <span class="cmt">/*.no_host                     =*/</span> false,
+        <span class="cmt">/*.no_alloc                    =*/</span> false,
+    };
+    <span class="kw">return</span> result;
+}</code></pre>
+<p>字段定义见 <code>include/llama.h:286-322</code>。理解这张表是理解后面分支的前提：<code>n_gpu_layers</code>、<code>split_mode</code>、<code>use_mmap</code>、<code>vocab_only</code>、<code>no_alloc</code>、<code>progress_callback</code> 会分别影响不同阶段。</p>
+</section>
+
+<section id="s2">
+<h2>2. <code>llama_model_load_from_file_impl()</code>：参数校验与设备选择</h2>
+<p><code>src/llama.cpp:931-1142</code>。函数签名：</p>
+<pre><code><span class="kw">static struct</span> llama_model * llama_model_load_from_file_impl(
+        <span class="kw">struct</span> gguf_context * metadata,
+        llama_model_set_tensor_data_t set_tensor_data,
+        <span class="kw">void</span> * set_tensor_data_ud,
+        <span class="kw">const</span> std::string &amp; path_model,
+        std::vector&lt;std::string&gt; &amp; splits,
+        FILE * file,
+        <span class="kw">struct</span> llama_model_params params);</code></pre>
+
+<h3>2.1 三种输入源必须“有且只有一个”</h3>
+<pre><code><span class="cmt">// 939-954</span>
+<span class="kw">int</span> n_sources_defined = 0;
+<span class="kw">if</span> (metadata != nullptr) n_sources_defined++;
+<span class="kw">if</span> (!path_model.empty()) n_sources_defined++;
+<span class="kw">if</span> (file != nullptr)     n_sources_defined++;
+<span class="kw">if</span> (n_sources_defined != 1) {
+    LLAMA_LOG_ERROR(<span class="str">"%s: exactly one out metadata, path_model, and file must be defined\n"</span>, __func__);
+    <span class="kw">return</span> nullptr;
+}</code></pre>
+<p>即模型来源只能三选一：<strong>外部 GGUF 元数据 / 文件路径 / 已打开的文件指针</strong>。</p>
+
+<h3>2.2 初始化计时与后端检查</h3>
+<pre><code><span class="cmt">// 955-960</span>
+ggml_time_init();
+
+<span class="kw">if</span> (!params.vocab_only &amp;&amp; ggml_backend_reg_count() == 0) {
+    LLAMA_LOG_ERROR(<span class="str">"%s: no backends are loaded. hint: use ggml_backend_load() ...\n"</span>, __func__);
+    <span class="kw">return</span> nullptr;
+}</code></pre>
+<ul>
+  <li><code>ggml_time_init()</code>：初始化高精度计时（Windows 下尤其需要）。</li>
+  <li>只要不是 <code>vocab_only</code>，就要求至少注册了一个 ggml backend，否则无法建 buffer。</li>
+</ul>
+
+<h3>2.3 默认进度回调</h3>
+<pre><code><span class="cmt">// 962-977</span>
+<span class="kw">unsigned</span> cur_percentage = 0;
+<span class="kw">if</span> (params.progress_callback == NULL) {
+    params.progress_callback_user_data = &amp;cur_percentage;
+    params.progress_callback = [](<span class="kw">float</span> progress, <span class="kw">void</span> * ctx) {
+        <span class="kw">unsigned</span> * cur_percentage_p = (<span class="kw">unsigned</span> *) ctx;
+        <span class="kw">unsigned</span> percentage = (<span class="kw">unsigned</span>) (100 * progress);
+        <span class="kw">while</span> (percentage &gt; *cur_percentage_p) {
+            *cur_percentage_p = percentage;
+            LLAMA_LOG_CONT(<span class="str">"."</span>);                 <span class="cmt">// 每涨 1% 打一个点</span>
+            <span class="kw">if</span> (percentage &gt;= 100) LLAMA_LOG_CONT(<span class="str">"\n"</span>);
+        }
+        <span class="kw">return</span> true;                             <span class="cmt">// 永不取消</span>
+    };
+}</code></pre>
+<p>如果调用方没给回调，就装一个“打点式”默认回调；回调返回 <code>false</code> 会让加载提前取消（对应后面的 <code>-2</code> 状态）。</p>
+
+<h3>2.4 创建模型对象</h3>
+<pre><code><span class="cmt">// 979</span>
+llama_model * model = <span class="kw">new</span> llama_model(params);</code></pre>
+<p>构造函数（<code>src/llama-model.cpp:668</code>）只做一件事：记录 <code>params</code>，并判断是否存在 tensor buffer type 覆盖：</p>
+<pre><code>llama_model::llama_model(<span class="kw">const</span> llama_model_params &amp; params)
+    : params(params), pimpl(std::make_unique&lt;impl&gt;()) {
+    pimpl-&gt;has_tensor_overrides = params.tensor_buft_overrides &amp;&amp; params.tensor_buft_overrides[0].pattern;
+}</code></pre>
+
+<h3>2.5 构建要使用的设备列表（核心分支）</h3>
+<p>这一段（<code>982-1101</code>）决定“权重最终放到哪些设备上”。</p>
+<h4>分支 A：调用方显式给了 <code>params.devices</code></h4>
+<pre><code><span class="cmt">// 982-1006</span>
+<span class="kw">if</span> (params.devices) {
+    <span class="kw">if</span> (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+        <span class="kw">size_t</span> n_devs = 0;
+        <span class="kw">while</span> (params.devices[n_devs]) n_devs++;
+        <span class="kw">if</span> (n_devs == 0) { ... <span class="kw">return</span> nullptr; }
+
+        <span class="cmt">// 多设备做张量并行时，用一个 "Meta device" 包住所有设备</span>
+        model-&gt;get_split_state_ud.n_devices = n_devs;
+        model-&gt;get_split_state_ud.model     = model;
+        model-&gt;devices.push_back({
+            true, ggml_backend_meta_device(params.devices, n_devs,
+                                           llama_meta_device_get_split_state,
+                                           &amp;model-&gt;get_split_state_ud)
+        });
+    } <span class="kw">else</span> {
+        <span class="kw">for</span> (ggml_backend_dev_t * dev = params.devices; *dev; ++dev)
+            model-&gt;devices.push_back({false, *dev});
+    }
+}</code></pre>
+<ul>
+  <li><code>llama_device</code> 的 <code>is_meta</code> 标志表示这是一个逻辑聚合设备。</li>
+  <li><code>LLAMA_SPLIT_MODE_TENSOR</code>（张量并行）会走 Meta device，并在后面用 <code>llama_meta_device_get_split_state</code> 回调决定每个张量切到哪。</li>
+</ul>
+<h4>分支 B：自动选设备（<code>params.devices == nullptr</code>）</h4>
+<p>先分成三类候选：<code>gpus</code>、<code>igpus</code>、<code>rpc_servers</code>（<code>1011-1013</code>）。</p>
+<ul>
+  <li><strong>张量并行模式</strong>（<code>1015-1042</code>）：遍历所有 backend 设备，跳过 CPU（<code>buffer_type == ggml_backend_cpu_buffer_type()</code>），剩余设备组成 Meta device。</li>
+  <li><strong>普通模式</strong>（<code>1043-1089</code>）：遍历设备并按类型分流：
+    <ul>
+      <li><code>CPU</code> / <code>ACCEL</code>：跳过（CPU 单独处理）。</li>
+      <li><code>GPU</code>：如果 backend 名字是 <code>RPC</code>，进 <code>rpc_servers</code>；否则用 <code>device_id</code> 去重，避免同一物理 GPU 被多个 backend 重复注册（如 CUDA + Vulkan 同时可见）。</li>
+      <li><code>IGPU</code>：进 <code>igpus</code>。</li>
+      <li><code>META</code>：<code>GGML_ABORT</code>（不应出现在这里）。</li>
+    </ul>
+  </li>
+</ul>
+<p>组装顺序（<code>1091-1100</code>）：</p>
+<pre><code>model-&gt;devices.insert(model-&gt;devices.begin(), rpc_servers.begin(), rpc_servers.end()); <span class="cmt">// RPC 放最前，减少网络传输</span>
+model-&gt;devices.insert(model-&gt;devices.end(),   gpus.begin(), gpus.end());               <span class="cmt">// 再放独显</span>
+<span class="kw">if</span> (model-&gt;devices.empty())                                                            <span class="cmt">// 一个都没有才用核显</span>
+    model-&gt;devices.insert(model-&gt;devices.end(), igpus.begin(), igpus.end());</code></pre>
+<div class="note">设计意图：RPC 放最前、独显优先、核显兜底。</div>
+
+<h3>2.6 单卡模式裁剪设备</h3>
+<pre><code><span class="cmt">// 1103-1117</span>
+<span class="kw">if</span> (params.split_mode == LLAMA_SPLIT_MODE_NONE) {
+    <span class="kw">if</span> (params.main_gpu &lt; 0) {
+        model-&gt;devices.clear();              <span class="cmt">// main_gpu &lt; 0：完全不用 GPU</span>
+    } <span class="kw">else</span> {
+        <span class="kw">if</span> (params.main_gpu &gt;= (<span class="kw">int</span>)model-&gt;devices.size()) {
+            LLAMA_LOG_ERROR(...);
+            llama_model_free(model);          <span class="cmt">// 这里正确释放了 model</span>
+            <span class="kw">return</span> nullptr;
+        }
+        llama_device main_gpu = model-&gt;devices[params.main_gpu];
+        model-&gt;devices.clear();
+        model-&gt;devices.push_back(main_gpu);   <span class="cmt">// 只保留主 GPU</span>
+    }
+}</code></pre>
+
+<h3>2.7 打印设备信息并调用真正的加载函数</h3>
+<pre><code><span class="cmt">// 1119-1126</span>
+<span class="kw">for</span> (<span class="kw">const auto</span> &amp; dev : model-&gt;devices) {
+    ggml_backend_dev_props props;
+    ggml_backend_dev_get_props(dev.dev, &amp;props);
+    LLAMA_LOG_INFO(<span class="str">"%s: using device %s (%s) (%s) - %zu MiB free\n"</span>, ...);
+}
+
+<span class="cmt">// 1128-1141</span>
+<span class="kw">const int</span> status = llama_model_load(metadata, set_tensor_data, set_tensor_data_ud,
+                                    path_model, splits, file, *model, params);
+GGML_ASSERT(status &lt;= 0);
+<span class="kw">if</span> (status &lt; 0) {
+    <span class="kw">if</span> (status == -1)      LLAMA_LOG_ERROR(<span class="str">"%s: failed to load model\n"</span>, __func__);
+    <span class="kw">else if</span> (status == -2) LLAMA_LOG_INFO (<span class="str">"%s: cancelled model load\n"</span>, __func__);
+    llama_model_free(model);                 <span class="cmt">// 失败统一释放</span>
+    <span class="kw">return</span> nullptr;
+}
+<span class="kw">return</span> model;                                <span class="cmt">// 成功返回裸指针，调用方负责 llama_model_free</span></code></pre>
+<div class="warn">注意：设备选择阶段的少数早期 <code>return nullptr</code>（如 <code>n_devs == 0</code>、张量并行无设备）发生在 <code>new llama_model</code> 之后但没有 <code>llama_model_free</code>。这些属于参数非法路径，正常调用不会触发；阅读时可留意。</div>
+</section>
+
+<section id="s3">
+<h2>3. <code>llama_model_load()</code>：加载流程编排</h2>
+<p><code>src/llama.cpp:874-929</code>。返回约定：</p>
+<pre><code>0  = 成功
+-1 = 出错（异常）
+-2 = 被 progress_callback 取消</code></pre>
+
+<h3>3.1 计时起点</h3>
+<pre><code><span class="cmt">// 877-882</span>
+model.t_load_us = 0;
+time_meas tm(model.t_load_us);     <span class="cmt">// RAII：析构时把耗时写入 t_load_us</span>
+model.t_start_us = tm.t_start_us;</code></pre>
+<p>注释说明：真实加载时间会在首次 eval 后重算，以把 mmap 的缺页开销算进去。</p>
+
+<h3>3.2 构造 <code>llama_model_loader</code>（GGUF 解析 + 权重索引）</h3>
+<pre><code><span class="cmt">// 884-888</span>
+<span class="kw">try</span> {
+    llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud,
+                          fname, splits, file,
+                          params.use_mmap, params.use_direct_io,
+                          params.check_tensors, params.no_alloc,
+                          params.kv_overrides, params.tensor_buft_overrides);
+    ml.print_info();</code></pre>
+<p>这一行是整条链路的信息来源，详见第 4 节。</p>
+
+<h3>3.3 依次加载 架构 → 超参 → 词表 → 统计</h3>
+<pre><code><span class="cmt">// 890-913</span>
+model.hparams.vocab_only = params.vocab_only;
+model.hparams.no_alloc   = params.no_alloc;
+
+<span class="kw">try</span> { model.load_arch(ml); }    <span class="kw">catch</span> (...) { <span class="kw">throw</span> ... <span class="str">"error loading model architecture"</span> ...; }
+<span class="kw">try</span> { model.load_hparams(ml); } <span class="kw">catch</span> (...) { <span class="kw">throw</span> ... <span class="str">"error loading model hyperparameters"</span> ...; }
+
+<span class="kw">if</span> (model.arch == LLM_ARCH_CLIP)
+    <span class="kw">throw</span> std::runtime_error(<span class="str">"CLIP cannot be used as main model, use it with --mmproj instead"</span>);
+
+<span class="kw">try</span> { model.load_vocab(ml); }   <span class="kw">catch</span> (...) { <span class="kw">throw</span> ... <span class="str">"error loading model vocabulary"</span> ...; }
+
+model.load_stats(ml);
+model.print_info();</code></pre>
+<p>顺序不能乱：<code>load_hparams</code> 需要 <code>arch</code>，<code>load_vocab</code> 依赖元数据，<code>load_tensors</code> 又依赖前三者。</p>
+
+<h3>3.4 <code>vocab_only</code> 提前返回</h3>
+<pre><code><span class="cmt">// 915-918</span>
+<span class="kw">if</span> (params.vocab_only) {
+    LLAMA_LOG_INFO(<span class="str">"%s: vocab only - skipping tensors\n"</span>, __func__);
+    <span class="kw">return</span> 0;                       <span class="cmt">// 只加载词表，不碰权重</span>
+}</code></pre>
+
+<h3>3.5 加载张量</h3>
+<pre><code><span class="cmt">// 920-922</span>
+<span class="kw">if</span> (!model.load_tensors(ml)) {
+    <span class="kw">return</span> -2;                      <span class="cmt">// 仅当被 progress_callback 取消时返回 false</span>
+}</code></pre>
+
+<h3>3.6 统一异常处理</h3>
+<pre><code><span class="cmt">// 923-928</span>
+} <span class="kw">catch</span> (<span class="kw">const</span> std::exception &amp; err) {
+    LLAMA_LOG_ERROR(<span class="str">"%s: error loading model: %s\n"</span>, __func__, err.what());
+    <span class="kw">return</span> -1;
+}
+<span class="kw">return</span> 0;</code></pre>
+<p>所有 <code>throw</code> 在这里收敛为 <code>-1</code>，由 impl 负责释放 <code>model</code>。</p>
+</section>
+
+<section id="s4">
+<h2>4. <code>llama_model_loader</code> 构造函数：把 GGUF 读成内存索引</h2>
+<p><code>src/llama-model-loader.cpp:510-819</code>。这是最“重”的一步之一。</p>
+
+<h3>4.1 记录 KV 覆盖与 buffer type 覆盖</h3>
+<pre><code><span class="cmt">// 524-535</span>
+<span class="kw">int</span> trace = 0;
+<span class="kw">if</span> (getenv(<span class="str">"LLAMA_TRACE"</span>)) trace = atoi(getenv(<span class="str">"LLAMA_TRACE"</span>));
+
+<span class="kw">if</span> (param_overrides_p != nullptr) {
+    <span class="kw">for</span> (<span class="kw">const auto</span> * p = param_overrides_p; p-&gt;key[0] != 0; p++) {
+        kv_overrides.insert({std::string(p-&gt;key), *p});
+    }
+}
+tensor_buft_overrides = param_tensor_buft_overrides_p;</code></pre>
+<ul>
+  <li><code>LLAMA_TRACE&gt;0</code> 会打印每个张量的详细信息。</li>
+  <li><code>kv_overrides</code> 允许调用方覆盖模型元数据（例如强制改某些超参）。</li>
+</ul>
+
+<h3>4.2 从文件加载主 GGUF（<code>!fname.empty()</code> 分支）</h3>
+<pre><code><span class="cmt">// 537-552</span>
+<span class="kw">struct</span> ggml_context * ctx = NULL;
+<span class="kw">struct</span> gguf_init_params params = {
+    <span class="cmt">/*.no_alloc = */</span> true,     <span class="cmt">// 只建元数据，不分配张量数据</span>
+    <span class="cmt">/*.ctx      = */</span> &amp;ctx,     <span class="cmt">// 同时返回一个 ggml_context，里面是张量“骨架”</span>
+};
+
+metadata_ptr.reset(gguf_init_from_file(fname.c_str(), params));
+metadata = metadata_ptr.get();
+<span class="kw">if</span> (metadata == nullptr)
+    <span class="kw">throw</span> std::runtime_error(format(<span class="str">"%s: failed to load model from %s"</span>, __func__, fname.c_str()));
+
+get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);   <span class="cmt">// 读 general.architecture</span>
+llm_kv = LLM_KV(llm_arch_from_string(arch_name));                  <span class="cmt">// 转成枚举</span></code></pre>
+<p>关键点：<code>no_alloc = true</code>，此时 <code>ctx</code> 中每个 <code>ggml_tensor</code> 只有形状/类型/名称，<code>data == nullptr</code>，真正的数据后面再搬运。</p>
+
+<h3>4.3 mmap 与 Direct I/O 的互斥处理</h3>
+<pre><code><span class="cmt">// 554-569</span>
+files.emplace_back(<span class="kw">new</span> llama_file(fname.c_str(), <span class="str">"rb"</span>, use_direct_io));
+contexts.emplace_back(ctx);
+
+<span class="kw">if</span> (use_mmap &amp;&amp; use_direct_io) {
+    <span class="kw">if</span> (files.back()-&gt;has_direct_io()) {
+        LLAMA_LOG_WARN(<span class="str">"%s: direct I/O is enabled, disabling mmap\n"</span>, __func__);
+        use_mmap = false;
+    } <span class="kw">else</span> {
+        LLAMA_LOG_WARN(<span class="str">"%s: direct I/O is not available, using mmap\n"</span>, __func__);
+        use_direct_io = false;
+        files.pop_back();
+        files.emplace_back(<span class="kw">new</span> llama_file(fname.c_str(), <span class="str">"rb"</span>, false));  <span class="cmt">// 用普通 fopen 重新打开以便 mmap</span>
+    }
+}</code></pre>
+<p>两者同时开启时：Direct I/O 优先，否则回退 mmap 并重开文件。</p>
+
+<h3>4.4 建立 <code>weights_map</code>（张量名 → 文件/偏移）</h3>
+<pre><code><span class="cmt">// 571-583</span>
+<span class="kw">for</span> (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+    std::string tensor_name = cur-&gt;name;
+    <span class="kw">if</span> (weights_map.find(tensor_name) != weights_map.end())
+        <span class="kw">throw</span> std::runtime_error(format(<span class="str">"invalid model: tensor '%s' is duplicated"</span>, ...));
+
+    n_elements += ggml_nelements(cur);
+    n_bytes    += ggml_nbytes(cur);
+    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+}</code></pre>
+<p><code>llama_tensor_weight</code> 的构造函数（<code>src/llama-model-loader.h:39-49</code>）会做两件重要的事：</p>
+<pre><code>offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
+<span class="kw">if</span> (offs + ggml_nbytes(tensor) &lt; offs || offs + ggml_nbytes(tensor) &gt; file-&gt;size())
+    <span class="kw">throw</span> std::runtime_error(format(<span class="str">"tensor '%s' data is not within the file bounds, model is corrupted or incomplete"</span>, ...));</code></pre>
+<p>即：<strong>计算张量在文件中的绝对偏移，并做越界校验</strong>（防损坏/截断模型）。</p>
+<p><code>weights_map</code> 使用 <code>weight_name_comparer</code>（<code>src/llama-model-loader.h:53-64</code>）排序，按 <code>blk.%d.</code> 的层号排序，让后续遍历更接近“逐层”顺序。</p>
+
+<h3>4.5 分片模型加载（<code>n_split &gt; 1</code>）</h3>
+<pre><code><span class="cmt">// 584-663</span>
+uint16_t n_split = 0;
+get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
+
+<span class="kw">if</span> (n_split &gt; 1) {
+    <span class="cmt">// 1) 必须从第 0 片开始加载</span>
+    uint16_t idx = 0;
+    <span class="kw">const</span> std::string kv_split_no = llm_kv(LLM_KV_SPLIT_NO);
+    get_key(kv_split_no, idx);
+    <span class="kw">if</span> (idx != 0) <span class="kw">throw</span> std::runtime_error(... <span class="str">"model must be loaded with the first split"</span> ...);
+
+    <span class="cmt">// 2) 若调用方没给 splits，则按命名规则自动推导</span>
+    <span class="kw">if</span> (splits.empty()) splits = llama_get_list_splits(fname, idx, n_split);
+
+    <span class="cmt">// 3) 校验数量</span>
+    <span class="kw">if</span> (n_split != (uint16_t)splits.size())
+        <span class="kw">throw</span> std::runtime_error(format(<span class="str">"invalid split count, given: %zu splits, but expected %d"</span>, ...));
+
+    <span class="cmt">// 4) 逐个加载剩余分片</span>
+    <span class="kw">for</span> (idx = 1; idx &lt; n_split; idx++) {
+        gguf_context_ptr ctx_gguf { gguf_init_from_file(splits[idx].c_str(), split_params) };
+        <span class="kw">if</span> (!ctx_gguf) <span class="kw">throw</span> ...;
+
+        <span class="cmt">// 校验分片序号与期望一致</span>
+        <span class="kw">const int</span> kid = gguf_find_key(ctx_gguf.get(), kv_split_no.c_str());
+        ...
+        <span class="kw">int</span> idx_gguf = gguf_get_val_u16(ctx_gguf.get(), kid);
+        <span class="kw">if</span> (idx_gguf != idx) <span class="kw">throw</span> ...;
+
+        files.emplace_back(<span class="kw">new</span> llama_file(splits[idx].c_str(), <span class="str">"rb"</span>, use_direct_io));
+        contexts.emplace_back(ctx);
+
+        <span class="cmt">// 把该分片的张量也加入 weights_map（注意 idx 记录来源文件）</span>
+        <span class="kw">for</span> (ggml_tensor * cur = ...) {
+            ...
+            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur));
+        }
+    }
+
+    <span class="cmt">// 5) 张量总数校验</span>
+    get_key(llm_kv(LLM_KV_SPLIT_TENSORS_COUNT), n_tensors);
+    <span class="kw">if</span> (n_tensors != (<span class="kw">int</span>) weights_map.size())
+        <span class="kw">throw</span> std::runtime_error(format(<span class="str">"corrupted model: %d tensors expected but %d found"</span>, ...));
+}</code></pre>
+<p>要点：分片模式下 <code>weights_map</code> 中每个条目的 <code>idx</code> 记录了它来自哪个分片文件，后续按 <code>idx</code> 去对应文件 mmap/读取。</p>
+
+<h3>4.6 从 <code>FILE *</code> 加载分支</h3>
+<pre><code><span class="cmt">// 664-693</span>
+} <span class="kw">else if</span> (file != nullptr) {
+    metadata_ptr.reset(gguf_init_from_file_ptr(file, params));
+    ...
+    get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+    llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+    files.emplace_back(<span class="kw">new</span> llama_file(file));
+    contexts.emplace_back(ctx);
+    <span class="cmt">// 同样建立 weights_map（idx 恒为 0）</span>
+}</code></pre>
+
+<h3>4.7 仅元数据分支（<code>llama_model_init_from_user</code>）</h3>
+<pre><code><span class="cmt">// 694-697</span>
+} <span class="kw">else</span> {
+    get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+    llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+}</code></pre>
+<p>此时没有 <code>files</code>，张量数据由调用方的 <code>set_tensor_data</code> 回调提供。</p>
+
+<h3>4.8 汇总元数据、推断文件类型、打印 KV</h3>
+<pre><code><span class="cmt">// 699-705</span>
+n_kv      = gguf_get_n_kv(metadata);
+n_tensors = weights_map.size();
+fver      = (<span class="kw">enum</span> llama_fver) gguf_get_version(metadata);
+LLAMA_LOG_INFO(<span class="str">"%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n"</span>, ...);</code></pre>
+<p><strong>推断量化类型 <code>ftype</code></strong>（<code>709-778</code>）：统计每种 <code>ggml_type</code> 的张量数量，取数量最多的类型映射为 <code>LLAMA_FTYPE_*</code>，再打上 <code>LLAMA_FTYPE_GUESSED</code> 标记；如果 GGUF 里有 <code>general.file_type</code>，则以它为准覆盖：</p>
+<pre><code>ftype = (llama_ftype) (ftype | LLAMA_FTYPE_GUESSED);
+uint32_t ftype_val = 0;
+<span class="kw">if</span> (get_key(LLM_KV_GENERAL_FILE_TYPE, ftype_val, false))
+    ftype = (llama_ftype) ftype_val;</code></pre>
+<p>随后（<code>780-807</code>）把所有 KV 与类型统计打印出来（注意日志说明：此输出不应用 KV overrides）。</p>
+
+<h3>4.9 收尾：mmap 支持检查与成员赋值</h3>
+<pre><code><span class="cmt">// 810-819</span>
+<span class="kw">if</span> (!llama_mmap::SUPPORTED) {
+    LLAMA_LOG_WARN(<span class="str">"%s: mmap is not supported on this platform\n"</span>, __func__);
+    use_mmap = false;
+}
+<span class="kw">this</span>-&gt;use_mmap      = use_mmap;
+<span class="kw">this</span>-&gt;use_direct_io = use_direct_io;
+<span class="kw">this</span>-&gt;check_tensors = check_tensors;
+<span class="kw">this</span>-&gt;no_alloc      = no_alloc;</code></pre>
+<p><code>print_info()</code>（<code>src/llama-model-loader.cpp:1687</code>）打印文件格式、文件类型、文件大小与 BPW。</p>
+</section>
+
+<section id="s5">
+<h2>5. <code>load_arch</code> / <code>load_hparams</code> / <code>load_vocab</code> / <code>load_stats</code></h2>
+
+<h3>5.1 <code>load_arch</code>（<code>src/llama-model.cpp:683</code>）</h3>
+<pre><code><span class="kw">void</span> llama_model::load_arch(llama_model_loader &amp; ml) {
+    arch = ml.get_arch();
+    <span class="kw">if</span> (arch == LLM_ARCH_UNKNOWN)
+        <span class="kw">throw</span> std::runtime_error(<span class="str">"unknown model architecture: '"</span> + ml.get_arch_name() + <span class="str">"'"</span>);
+
+    <span class="kw">if</span> (!devices.empty() &amp;&amp; devices[0].is_meta &amp;&amp; !llm_arch_supports_sm_tensor(arch))
+        <span class="kw">throw</span> std::runtime_error(std::string(<span class="str">"LLAMA_SPLIT_MODE_TENSOR not implemented for architecture '"</span>) + llm_arch_name(arch) + <span class="str">"'"</span>);
+}</code></pre>
+<ul>
+  <li>把 <code>general.architecture</code> 字符串（如 <code>llama</code>、<code>qwen2</code>、<code>deepseek2</code>）转成 <code>llm_arch</code> 枚举。</li>
+  <li>若启用了张量并行但该架构未实现对应切分逻辑，直接报错。</li>
+</ul>
+
+<h3>5.2 <code>load_hparams</code>（<code>src/llama-model.cpp:693</code>）</h3>
+<p>分两大部分：</p>
+<ol>
+  <li><strong>先把所有非数组 KV 以字符串形式存进 <code>gguf_kv</code></strong>（<code>696-705</code>），便于后续查询/调试。</li>
+  <li><strong>按架构读取超参数</strong>。开头读通用字段：</li>
+</ol>
+<pre><code>ml.get_key(LLM_KV_GENERAL_NAME, name, false);
+
+<span class="cmt">// 词表模式或 CLIP 到此为止</span>
+<span class="kw">if</span> (hparams.vocab_only || ml.get_arch() == LLM_ARCH_CLIP) <span class="kw">return</span>;
+
+ml.get_key(LLM_KV_CONTEXT_LENGTH,          hparams.n_ctx_train);
+ml.get_key(LLM_KV_EMBEDDING_LENGTH,        hparams.n_embd);
+ml.get_key(LLM_KV_ATTENTION_CAUSAL,        hparams.causal_attn,   false);
+ml.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer);
+ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,      false);
+ml.get_key(LLM_KV_EXPERT_USED_COUNT,       hparams.n_expert_used, false);
+...</code></pre>
+<p>随后读取逐层的 <code>n_ff</code>、<code>n_head</code>、<code>n_head_kv</code>（<code>get_key_or_arr</code> 支持“标量或数组”两种写法），以及 RoPE 相关参数：</p>
+<pre><code>ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer, false);
+ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer, false);
+hparams.n_head_kv_arr = hparams.n_head_arr;
+ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer, false);
+
+hparams.n_ctx_orig_yarn = hparams.n_ctx_train;
+ml.get_key(LLM_KV_ROPE_SCALING_ORIG_CTX_LEN, hparams.n_ctx_orig_yarn, false);
+hparams.rope_freq_base_train = 10000.0f;
+ml.get_key(LLM_KV_ROPE_FREQ_BASE, hparams.rope_freq_base_train, false);</code></pre>
+<p>之后是一段很长的 <code>switch (arch)</code>，针对不同模型族设置默认值、读取专有字段、做一致性校验。核心原则：<strong>通用键先读，架构特有键在 switch 中补齐，最后断言自洽</strong>（例如专家数量、<code>n_rot</code> 与 head dim 的关系）。</p>
+
+<h3>5.3 <code>load_vocab</code>（<code>src/llama-model.cpp:2952</code>）</h3>
+<pre><code><span class="kw">void</span> llama_model::load_vocab(llama_model_loader &amp; ml) {
+    <span class="kw">const auto</span> kv = LLM_KV(arch);
+    vocab.load(ml, kv);
+}</code></pre>
+<p>转发到 <code>llama_vocab::impl::load</code>（<code>src/llama-vocab.cpp:1749</code>），核心是：</p>
+<ol>
+  <li>读 <code>tokenizer.ggml.model</code>、<code>tokenizer.ggml.pre</code>，确定分词器类型。</li>
+  <li>按类型构建：
+    <ul>
+      <li><code>llama</code> → SPM（SentencePiece）</li>
+      <li><code>bert</code> → WPM（WordPiece）</li>
+      <li><code>gpt2</code> / <code>gemma4</code> → BPE（读 <code>merges</code> 构建 <code>bpe_ranks</code>）</li>
+      <li><code>t5</code> → UGM（读 <code>precompiled_charsmap</code>）</li>
+      <li><code>rwkv</code>、<code>plamo2</code> 等 → 各自类型</li>
+      <li><code>no_vocab</code>/<code>none</code> → <code>LLAMA_VOCAB_TYPE_NONE</code>，可创建占位 token</li>
+    </ul>
+  </li>
+  <li>读 token 列表、score、type、special tokens 等，最终得到 <code>id_to_token</code> / <code>token_to_id</code>。</li>
+</ol>
+
+<h3>5.4 <code>load_stats</code>（<code>src/llama-model.cpp:678</code>）</h3>
+<pre><code><span class="kw">void</span> llama_model::load_stats(llama_model_loader &amp; ml) {
+    pimpl-&gt;n_elements = ml.n_elements;
+    pimpl-&gt;n_bytes    = ml.n_bytes;
+}</code></pre>
+<p>把 loader 统计的元素数/字节数存到模型，供 <code>n_elements()</code> 等 API 使用。</p>
+<p><code>print_info()</code>（<code>src/llama-model.cpp:8096</code>）会打印架构、<code>n_ctx_train</code>、<code>n_embd</code>、<code>n_layer</code>、<code>n_head</code>、<code>n_head_kv</code>、<code>n_rot</code>、<code>n_swa</code> 等超参，是排查“模型是否被正确识别”的第一手日志。</p>
+</section>
+
+<section id="s6">
+<h2>6. <code>load_tensors()</code>：建张量、分配 buffer、搬运权重</h2>
+<p><code>src/llama-model.cpp:2958-8035</code>。这是最长的一个函数，主体是<strong>按架构创建各层张量</strong>（几百行到数千行的 <code>switch (arch)</code>），但骨架步骤很清晰。可分成 7 个阶段。</p>
+
+<h3>6.1 准备 buffer type 列表</h3>
+<pre><code><span class="cmt">// 2958-2978</span>
+<span class="kw">const auto</span> &amp; split_mode   = params.split_mode;
+<span class="kw">const auto</span> &amp; use_mlock    = params.use_mlock;
+<span class="kw">const auto</span> &amp; tensor_split = params.tensor_split;
+<span class="kw">const int</span> n_layer      = hparams.n_layer;
+<span class="kw">const int</span> n_gpu_layers = <span class="kw">this</span>-&gt;n_gpu_layers();
+<span class="kw">const bool</span> use_mmap_buffer = true;
+
+LLAMA_LOG_INFO(<span class="str">"%s: loading model tensors, this can take a while... (mmap = %s, direct_io = %s)\n"</span>, ...);
+
+<span class="cmt">// CPU 侧可选 buffer 类型（含 extra bufts / host buffer 等）</span>
+pimpl-&gt;cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
+
+<span class="cmt">// 每个 GPU 设备一份候选 buffer 类型，最后追加 CPU 类型作为 fallback</span>
+<span class="kw">for</span> (<span class="kw">const auto</span> &amp; dev : devices) {
+    buft_list_t buft_list = make_gpu_buft_list(dev.dev, split_mode, tensor_split);
+    buft_list.insert(buft_list.end(), pimpl-&gt;cpu_buft_list.begin(), pimpl-&gt;cpu_buft_list.end());
+    pimpl-&gt;gpu_buft_list.emplace(dev.dev, std::move(buft_list));
+}</code></pre>
+<p><code>n_gpu_layers()</code>（<code>src/llama-model.cpp:8065</code>）：</p>
+<pre><code><span class="kw">return</span> params.n_gpu_layers &gt;= 0 ? params.n_gpu_layers : hparams.n_layer + 1;</code></pre>
+<p>即默认 <code>-1</code> 表示<strong>全部层（含输出层）上 GPU</strong>。</p>
+
+<h3>6.2 计算各设备切分比例</h3>
+<pre><code><span class="cmt">// 2985-3016</span>
+<span class="kw">bool</span> all_zero = tensor_split == nullptr ||
+                std::all_of(tensor_split, tensor_split + n_devices(), [](<span class="kw">float</span> x){ <span class="kw">return</span> x == 0.0f; });
+std::vector&lt;<span class="kw">float</span>&gt; splits(n_devices());
+
+<span class="kw">if</span> (all_zero) {
+    <span class="cmt">// 默认按各设备“空闲显存”比例切</span>
+    <span class="kw">for</span> (<span class="kw">size_t</span> i = 0; i &lt; n_devices(); ++i) {
+        ggml_backend_dev_t dev = devices[i].dev;
+        <span class="kw">size_t</span> total, free;
+        ggml_backend_dev_memory(dev, &amp;free, &amp;total);
+        <span class="kw">if</span> (free == 0 &amp;&amp; total == 0)          <span class="cmt">// 设备不上报内存时用主机内存兜底</span>
+            ggml_backend_dev_memory(cpu_dev, &amp;free, &amp;total);
+        splits[i] = free;
+    }
+} <span class="kw">else</span> {
+    std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
+}
+
+<span class="cmt">// 前缀和 → 归一化 → 得到 [0,1] 的分割点</span>
+<span class="kw">float</span> split_sum = 0.0f;
+<span class="kw">for</span> (<span class="kw">size_t</span> i = 0; i &lt; n_devices(); ++i) { split_sum += splits[i]; splits[i] = split_sum; }
+<span class="kw">for</span> (<span class="kw">size_t</span> i = 0; i &lt; n_devices(); ++i) splits[i] /= split_sum;</code></pre>
+
+<h3>6.3 决定每层落在哪个设备</h3>
+<pre><code><span class="cmt">// 3018-3030</span>
+<span class="kw">const int</span> i_gpu_start   = std::max(<span class="kw">int</span>(hparams.n_layer) + 1 - n_gpu_layers, 0);
+<span class="kw">const int</span> act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, <span class="kw">int</span>(n_layer) + 1);
+
+<span class="kw">auto</span> get_layer_buft_list = [&amp;](<span class="kw">int</span> il) -&gt; llama_model::impl::layer_dev {
+    <span class="kw">const bool</span> is_swa = il &lt; <span class="kw">int</span>(hparams.n_layer) &amp;&amp; hparams.is_swa(il);
+    <span class="kw">if</span> (il &lt; i_gpu_start || (il - i_gpu_start) &gt;= act_gpu_layers) {
+        <span class="cmt">// 落在 CPU 的层</span>
+        <span class="kw">return</span> {cpu_dev, &amp;pimpl-&gt;cpu_buft_list};
+    }
+    <span class="cmt">// 用分割点判断落在哪个 GPU</span>
+    <span class="kw">const int</span> layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(),
+                                           <span class="kw">float</span>(il - i_gpu_start)/act_gpu_layers) - splits.begin();
+    <span class="kw">auto</span> * dev = devices.at(layer_gpu).dev;
+    <span class="kw">return</span> {dev, &amp;pimpl-&gt;gpu_buft_list.at(dev)};
+};</code></pre>
+<p>然后分配：</p>
+<pre><code><span class="cmt">// 3032-3043</span>
+pimpl-&gt;dev_input = { cpu_dev, &amp;pimpl-&gt;cpu_buft_list };   <span class="cmt">// 输入层始终 CPU</span>
+pimpl-&gt;dev_layer.resize(n_layer);
+<span class="kw">for</span> (<span class="kw">int</span> il = 0; il &lt; n_layer; ++il)
+    pimpl-&gt;dev_layer[il] = get_layer_buft_list(il);
+pimpl-&gt;dev_output = get_layer_buft_list(n_layer);        <span class="cmt">// 输出层</span></code></pre>
+<div class="note">注释明确说明：输入层 offload 收益很小，所以固定放 CPU。</div>
+
+<h3>6.4 创建张量骨架（按架构 switch）</h3>
+<p>先定义统一的 <code>create_tensor</code> lambda：</p>
+<pre><code><span class="cmt">// 3073-3078</span>
+<span class="kw">auto</span> create_tensor = [&amp;](<span class="kw">const</span> LLM_TN_IMPL &amp; tn, <span class="kw">const</span> std::initializer_list&lt;int64_t&gt; &amp; ne, <span class="kw">int</span> flags) -&gt; ggml_tensor * {
+    <span class="kw">const</span> buft_list_t * buft_list_layer = tn.bid == -1 ? nullptr : pimpl-&gt;dev_layer.at(tn.bid).buft_list;
+    <span class="kw">return</span> ml.create_tensor(
+        hparams, &amp;pimpl-&gt;cpu_buft_list, pimpl-&gt;dev_input.buft_list, pimpl-&gt;dev_output.buft_list, buft_list_layer,
+        tn, ne, flags);
+};</code></pre>
+<ul>
+  <li><code>tn</code> 是 <code>LLM_TN</code>（tensor name），把逻辑张量名（如 <code>LLM_TENSOR_ATTN_Q</code>）+ 后缀 + 层号拼成 GGUF 里的真实名字。</li>
+  <li><code>ne</code> 是期望维度，<code>create_tensor</code> 会与文件里的元数据做形状校验。</li>
+  <li><code>flags</code> 支持：<code>TENSOR_NOT_REQUIRED</code>（可缺省）、<code>TENSOR_DUPLICATED</code>（复用/复制）、<code>TENSOR_SKIP</code>、<code>TENSOR_SKIP_IF_VIRTUAL</code>。</li>
+</ul>
+<p>随后是巨大的 <code>switch (arch)</code>（从约 <code>3110</code> 行一直到 <code>7888</code> 行），为每种架构逐层创建 <code>tok_embd</code>、<code>output_norm</code>、<code>output</code>、<code>attn_norm</code>、<code>wq/wk/wv/wo</code>、<code>ffn_*</code>、<code>rope_freqs</code>、MoE 的 <code>ffn_*_exps</code>、SSM 相关张量等。以 LLaMA 为例（<code>3121-3166</code> 附近）：</p>
+<pre><code>tok_embd    = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, <span class="str">"weight"</span>), {n_embd, n_vocab}, 0);
+output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, <span class="str">"weight"</span>), {n_embd}, 0);
+output      = create_tensor(tn(LLM_TENSOR_OUTPUT, <span class="str">"weight"</span>), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+
+<span class="kw">for</span> (<span class="kw">int</span> i = 0; i &lt; n_layer; ++i) {
+    <span class="kw">auto</span> &amp; layer = layers[i];
+    layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, <span class="str">"weight"</span>, i), {n_embd}, 0);
+    create_tensor_qkv(layer, i, n_embd, n_embd_head_k*n_head, n_embd_k_gqa, n_embd_v_gqa, 0);
+    layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, <span class="str">"weight"</span>, i), {n_embd_head_k*n_head, n_embd}, 0);
+    layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, <span class="str">"weight"</span>, i), {n_embd}, 0);
+    layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, <span class="str">"weight"</span>, i), {n_embd, n_ff}, 0);
+    layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, <span class="str">"weight"</span>, i), {n_ff, n_embd}, 0);
+    layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   <span class="str">"weight"</span>, i), {n_embd, n_ff}, 0);
+}</code></pre>
+<p>辅助函数处理“合并/分离”写法：</p>
+<ul>
+  <li><code>create_tensor_qkv</code>（<code>3095</code>）：优先找合并的 <code>attn_qkv</code>，找不到再分别建 <code>wq/wk/wv</code>（兼容不同导出格式）。</li>
+  <li><code>create_tensor_gate_up_exps</code>（<code>3086</code>）：优先找合并的 <code>ffn_gate_up_exps</code>，否则分开建 gate/up。</li>
+</ul>
+<div class="note">这一段代码量最大，但模式高度重复：<strong>按架构定义、按层号循环、必要时用 <code>TENSOR_NOT_REQUIRED</code> 兼容不同版本权重</strong>。</div>
+
+<h3>6.5 收尾校验：张量数量必须匹配</h3>
+<pre><code><span class="cmt">// 7890-7897</span>
+ml.done_getting_tensors();
+
+<span class="cmt">// populate tensors_by_name</span>
+<span class="kw">for</span> (<span class="kw">auto</span> &amp; [_, ctx_ptr] : ml.ctx_map) {
+    <span class="kw">for</span> (<span class="kw">auto</span> * cur = ggml_get_first_tensor(ctx_ptr.get()); cur; cur = ggml_get_next_tensor(ctx_ptr.get(), cur))
+        tensors_by_name.emplace_back(ggml_get_name(cur), cur);
+}</code></pre>
+<p><code>done_getting_tensors()</code>（<code>src/llama-model-loader.cpp:1315</code>）做关键一致性检查：</p>
+<pre><code><span class="kw">void</span> llama_model_loader::done_getting_tensors() <span class="kw">const</span> {
+    <span class="kw">if</span> (n_created != n_tensors)
+        <span class="kw">throw</span> std::runtime_error(format(<span class="str">"%s: wrong number of tensors; expected %d, got %d"</span>, __func__, n_tensors, n_created));
+    <span class="kw">if</span> (n_tensors_moved &gt; 0) {
+        LLAMA_LOG_DEBUG(<span class="str">"%s: tensor '%s' ... cannot be used with preferred buffer type %s, using %s instead\n"</span>, ...);
+    }
+}</code></pre>
+<p>含义：<strong>模型里声明的张量必须全部被“认领”</strong>，否则说明架构解析与实际权重不匹配（常见于不支持的变体或损坏文件）。</p>
+
+<h3>6.6 建立 mmap 映射并分配后端 buffer</h3>
+<pre><code><span class="cmt">// 7899-7900</span>
+ml.init_mappings(true, use_mlock ? &amp;pimpl-&gt;mlock_mmaps : nullptr);
+pimpl-&gt;mappings.reserve(ml.mappings.size());</code></pre>
+<p><code>init_mappings</code>（<code>src/llama-model-loader.cpp:1326</code>）在 <code>use_mmap</code> 时对每个文件建立 <code>llama_mmap</code>，可选 mlock。</p>
+<p>核心分配循环（<code>7910-7991</code>）：</p>
+<pre><code><span class="kw">for</span> (<span class="kw">auto</span> &amp; [buft, ctx_ptr] : ml.ctx_map) {          <span class="cmt">// 每个 buffer type 一个 ggml_context</span>
+    ggml_context * ctx = ctx_ptr.get();
+    <span class="kw">if</span> (ggml_get_first_tensor(ctx) == nullptr) <span class="kw">continue</span>;
+
+    <span class="cmt">// 判断能否用 mmap 的 host 指针直接做 buffer</span>
+    <span class="kw">bool</span> buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
+    <span class="kw">bool</span> is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
+
+    <span class="kw">if</span> (ml.use_mmap &amp;&amp; use_mmap_buffer &amp;&amp; buffer_from_host_ptr_supported &amp;&amp; is_default_buft) {
+        <span class="cmt">// 用 mmap 区间直接构造 backend buffer，零拷贝</span>
+        <span class="kw">for</span> (uint32_t idx = 0; idx &lt; ml.files.size(); idx++) {
+            ml.get_mapping_range(&amp;first, &amp;last, &amp;addr, idx, ctx);
+            <span class="kw">if</span> (first &gt;= last) <span class="kw">continue</span>;
+            ggml_backend_buffer_t buf =
+                ggml_backend_dev_buffer_from_host_ptr(dev, (<span class="kw">char</span> *)addr + first, last - first, max_size);
+            ...
+            buf_map.emplace(idx, buf);
+        }
+    } <span class="kw">else</span> {
+        <span class="kw">if</span> (ml.no_alloc) {
+            <span class="cmt">// 只模拟分配：给每个张量挂 dummy buffer</span>
+            buf = ggml_backend_buft_alloc_buffer(buft, 0);
+            <span class="kw">for</span> (ggml_tensor * t = ...; t; ...) t-&gt;buffer = buf;
+        } <span class="kw">else</span> {
+            <span class="cmt">// 真正按 ctx 里所有张量一次性分配 buffer</span>
+            buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+        }
+        <span class="kw">if</span> (use_mlock &amp;&amp; ggml_backend_buffer_is_host(buf)) { <span class="cmt">/* mlock */</span> }
+        <span class="kw">for</span> (uint32_t idx = 0; idx &lt; ml.files.size(); idx++) buf_map.emplace(idx, buf);
+    }
+
+    <span class="cmt">// 标记 buffer 用途为“权重”，供调度器优先把相关算子放到该设备</span>
+    ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+}</code></pre>
+<p><code>get_mapping_range</code>（<code>src/llama-model-loader.cpp:1359</code>）会遍历该 <code>ctx</code> 中属于第 <code>idx</code> 个文件的张量，求出最小/最大偏移，从而<strong>只映射真正用到的 mmap 区间</strong>（对 Metal/Apple Silicon 的部分 offload 很关键）。</p>
+<p>随后打印 offload 情况与各 buffer 大小（<code>7993-8015</code>）：</p>
+<pre><code>LLAMA_LOG_INFO(<span class="str">"%s: offloaded %d/%d layers to GPU\n"</span>, ...);
+LLAMA_LOG_INFO(<span class="str">"%s: %12s model buffer size = %8.2f MiB\n"</span>, ...);</code></pre>
+<p>若 <code>no_alloc</code>，到此直接返回（<code>8017-8019</code>），只做“内存占用模拟”。</p>
+
+<h3>6.7 搬运权重数据</h3>
+<pre><code><span class="cmt">// 8021-8034</span>
+<span class="kw">for</span> (<span class="kw">auto</span> &amp; [ctx, buf_map] : ctx_buf_maps) {
+    <span class="kw">if</span> (!ml.load_all_data(ctx, buf_map, use_mlock ? &amp;pimpl-&gt;mlock_mmaps : NULL,
+                          params.progress_callback, params.progress_callback_user_data)) {
+        <span class="kw">return</span> false;                 <span class="cmt">// 被取消</span>
+    }
+}
+
+<span class="kw">if</span> (use_mmap_buffer) {
+    <span class="kw">for</span> (<span class="kw">auto</span> &amp; mapping : ml.mappings)
+        pimpl-&gt;mappings.emplace_back(std::move(mapping));   <span class="cmt">// 保留 mmap 生命周期</span>
+}
+<span class="kw">return</span> true;</code></pre>
+</section>
+
+<section id="s7">
+<h2>7. <code>llama_model_loader::create_tensor()</code>：张量如何绑定到 buffer type</h2>
+<p><code>src/llama-model-loader.cpp:1045-1285</code>。这是连接“逻辑张量”和“物理设备”的关键函数。</p>
+
+<h3>7.1 每个 buffer type 一个 <code>ggml_context</code></h3>
+<pre><code><span class="kw">auto</span> ctx_for_buft = [&amp;](ggml_backend_buffer_type_t buft) -&gt; ggml_context * {
+    <span class="kw">auto</span> it = ctx_map.find(buft);
+    <span class="kw">if</span> (it == ctx_map.end()) {
+        <span class="kw">int</span> max_n_tensors = n_tensors;
+        max_n_tensors += 1;                  <span class="cmt">// duplicated output</span>
+        max_n_tensors += hparams.n_layer*2;  <span class="cmt">// duplicated rope freq</span>
+        <span class="kw">if</span> (files.empty()) max_n_tensors += hparams.n_layer*256;  <span class="cmt">// 外部构造留足余量</span>
+        <span class="kw">const size_t</span> ctx_size = ggml_tensor_overhead()*max_n_tensors;
+
+        ggml_init_params params = { ctx_size, NULL, <span class="cmt">/*no_alloc=*/</span>true };
+        ggml_context * ctx = ggml_init(params);
+        ctx_map.emplace(buft, ctx);
+        <span class="kw">return</span> ctx;
+    }
+    <span class="kw">return</span> it-&gt;second.get();
+};</code></pre>
+<p>为什么按 buffer type 分 ctx？因为 backend 分配 buffer 时是“按 ctx 批量分配”，同一 buffer type 的张量放在同一 ctx 里可以一次分配，且便于 mmap 零拷贝。</p>
+
+<h3>7.2 为单个张量选 buffer type</h3>
+<p><code>buft_for_tensor</code>（<code>1078-1211</code>）依次做：</p>
+<ol>
+  <li><strong>缺失处理</strong>：<code>t_meta == nullptr</code> 时，若 <code>TENSOR_NOT_REQUIRED</code> 返回 <code>nullptr</code>，否则抛错。</li>
+  <li><strong>重复张量特判</strong>：<code>token_embd</code> 且 <code>TENSOR_DUPLICATED</code> 时按 <code>output</code> 处理。</li>
+  <li><strong>查张量信息</strong>：<code>llm_tensor_info_for(tn_tensor)</code> 得到 <code>op</code> 和 <code>layer</code>（INPUT / OUTPUT / REPEATING）。</li>
+  <li><strong>跳过无用张量</strong>：<code>info.op == GGML_OP_NONE || TENSOR_SKIP</code> → 记录日志、<code>size_data -= nbytes</code>、<code>n_created++</code>、返回 <code>nullptr</code>。</li>
+  <li><strong>bias 修正</strong>：bias 张量的 <code>op</code> 从 <code>MUL_MAT</code> 改为 <code>ADD</code>，MoE 的 <code>MUL_MAT_ID</code> 改为 <code>ADD_ID</code>。</li>
+  <li><strong>层类型校验</strong>：INPUT/OUTPUT 层不能带 <code>bid</code>，REPEATING 必须带 <code>bid</code>。</li>
+  <li><strong>选择候选列表</strong>：按 <code>info.layer</code> 选 <code>buft_list_input</code> / <code>buft_list_output</code> / <code>buft_list_layer</code>。</li>
+  <li><strong>应用覆盖规则</strong>：遍历 <code>tensor_buft_overrides</code>，用正则匹配张量名；若覆盖到 CPU buffer，还会调用 <code>select_weight_buft(...)</code> 选择更合适的 CPU extra buffer（并提示 mmap 下性能问题）。</li>
+  <li><strong>默认选择</strong>：<code>select_weight_buft(hparams, t_meta, op, buft_list)</code>。</li>
+  <li><strong>mmap 特例</strong>：<code>use_mmap</code> 时避免用 host buffer，改回 CPU buffer type。</li>
+  <li><strong>统计“被迫换 buffer”的张量</strong>（<code>n_tensors_moved</code>）。</li>
+</ol>
+
+<h3>7.3 两种创建路径</h3>
+<p><strong>无文件（外部构造）</strong>（<code>1213-1249</code>）：根据 <code>ne</code> 和 GGUF 中记录的类型手工构造 <code>ggml_tensor</code> 元数据，然后 <code>ggml_dup_tensor</code> 到目标 ctx。</p>
+<p><strong>有文件（标准路径）</strong>（<code>1251-1284</code>）：</p>
+<pre><code>ggml_tensor * t_meta = get_tensor_meta(tn.str().c_str());
+ggml_backend_buffer_type_t buft = buft_for_tensor(t_meta);
+<span class="kw">if</span> (buft == nullptr) <span class="kw">return</span> nullptr;
+
+ggml_context * ctx = ctx_for_buft(buft);
+
+<span class="cmt">// 重复张量：若同 ctx 里已存在同名张量，直接复用</span>
+<span class="kw">if</span> (flags &amp; TENSOR_DUPLICATED) {
+    <span class="kw">if</span> (ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str())) <span class="kw">return</span> t;
+}
+
+<span class="cmt">// 形状校验（与 GGUF 元数据比对）</span>
+<span class="kw">const</span> ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags &amp; TENSOR_NOT_REQUIRED));
+<span class="kw">if</span> (cur == NULL) <span class="kw">return</span> NULL;
+
+<span class="cmt">// 在目标 ctx 中创建同形状张量（no_alloc，无数据）</span>
+ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
+ggml_set_name(tensor, ggml_get_name(cur));
+
+<span class="kw">if</span> (flags &amp; TENSOR_DUPLICATED) size_data += ggml_nbytes(cur);  <span class="cmt">// 复制也要占数据量</span>
+<span class="kw">else</span>                          n_created++;
+
+<span class="kw">return</span> tensor;</code></pre>
+<p><code>check_tensor_dims</code>（<code>src/llama-model-loader.cpp:862</code>）逐维比较期望 <code>ne</code> 与文件中的 <code>cur-&gt;ne</code>，不一致即抛“has wrong shape”，这是<strong>加载期最早发现权重与架构不匹配的地方</strong>。</p>
+</section>
+
+<section id="s8">
+<h2>8. <code>load_all_data()</code>：把权重搬进 buffer</h2>
+<p><code>src/llama-model-loader.cpp:1399-1681</code>。根据是否 mmap、是否 host buffer、是否支持异步上传，走三条路径。</p>
+
+<h3>8.1 外部构造：直接回调</h3>
+<pre><code><span class="cmt">// 1405-1410</span>
+<span class="kw">if</span> (files.empty()) {
+    <span class="kw">for</span> (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t))
+        set_tensor_data(t, set_tensor_data_ud);       <span class="cmt">// 调用方填充数据</span>
+    <span class="kw">return</span> true;
+}</code></pre>
+
+<h3>8.2 尝试启用异步上传</h3>
+<pre><code><span class="cmt">// 1416-1505</span>
+<span class="kw">constexpr size_t</span> n_buffers = 4;                        <span class="cmt">// 4 个 1MB 级 staging buffer</span>
+<span class="kw">size_t</span> alignment = max(所有文件 read_alignment());
+<span class="kw">const size_t</span> buffer_size = alignment != 1 ? 64MB + 2*alignment : 1MB;
+
+<span class="kw">auto</span> * upload_backend = [&amp;](...) {
+    <span class="kw">if</span> (use_mmap || check_tensors) <span class="kw">return</span> nullptr;     <span class="cmt">// mmap / 校验时不做异步</span>
+    <span class="cmt">// 需要：buffer 有 device、是默认 buffer type、设备支持 async/host_buffer/events</span>
+    <span class="cmt">// 然后创建 n_buffers 个 pinned host buffer + event + backend</span>
+}(...);</code></pre>
+<p>只有在<strong>非 mmap、非校验、设备支持异步</strong>时才会启用 pinned memory + event 的异步上传。</p>
+
+<h3>8.3 主循环：逐张量搬运</h3>
+<pre><code><span class="cmt">// 1514-1635</span>
+<span class="kw">for</span> (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+    <span class="kw">const auto</span> * weight = get_weight(ggml_get_name(cur));
+    <span class="kw">if</span> (weight == nullptr) <span class="kw">continue</span>;                    <span class="cmt">// 分片专家模型可能出现</span>
+
+    <span class="kw">if</span> (progress_callback &amp;&amp; !progress_callback((<span class="kw">float</span>)size_done/size_data, user_data))
+        <span class="kw">return</span> false;                                   <span class="cmt">// 用户取消</span>
+
+    <span class="kw">size_t</span> n_size = ggml_nbytes(cur);
+
+    <span class="kw">if</span> (use_mmap) {
+        <span class="cmt">// 路径 A：mmap</span>
+        uint8_t * data = (uint8_t *)mapping-&gt;addr() + weight-&gt;offs;
+        <span class="kw">if</span> (check_tensors) 异步校验;
+        <span class="kw">if</span> (buf_mmap &amp;&amp; cur-&gt;data == nullptr)
+            ggml_backend_tensor_alloc(buf_mmap, cur, data);   <span class="cmt">// 直接把张量指向 mmap 地址（零拷贝）</span>
+        <span class="kw">else</span>
+            ggml_backend_tensor_set(cur, data, 0, n_size);    <span class="cmt">// 否则复制到 buffer</span>
+    } <span class="kw">else</span> {
+        <span class="kw">const auto</span> &amp; file = files.at(weight-&gt;idx);
+        <span class="kw">if</span> (ggml_backend_buffer_is_host(cur-&gt;buffer)) {
+            <span class="cmt">// 路径 B：host buffer，普通 read</span>
+            file-&gt;seek(weight-&gt;offs, SEEK_SET);
+            file-&gt;read_raw(cur-&gt;data, n_size);
+        } <span class="kw">else if</span> (upload_backend) {
+            <span class="cmt">// 路径 C：读入 pinned 内存 → 异步上传 GPU（分块、对齐、事件同步）</span>
+            ...
+            ggml_backend_tensor_set_async(upload_backend, cur, ptr_data, data_read, data_to_copy);
+            ggml_backend_event_record(events[buffer_idx], upload_backend);
+        } <span class="kw">else</span> {
+            <span class="cmt">// 路径 D：读入临时 buffer 再 set</span>
+            read_buf.resize(n_size);
+            file-&gt;read_raw(read_buf.data(), n_size);
+            ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
+        }
+    }
+
+    size_done += n_size;
+}</code></pre>
+
+<h3>8.4 收尾：校验结果、释放临时资源、解除多余 mmap</h3>
+<pre><code><span class="cmt">// 1637-1680</span>
+<span class="cmt">// 1) 等待所有异步校验 future</span>
+<span class="kw">for</span> (<span class="kw">auto</span> &amp; future : validation_result) {
+    <span class="kw">auto</span> result = future.get();
+    <span class="kw">if</span> (!result.second) { LLAMA_LOG_ERROR(... <span class="str">"has invalid data"</span>); validation_failed = true; }
+}
+<span class="kw">if</span> (validation_failed) <span class="kw">throw</span> std::runtime_error(<span class="str">"found tensors with invalid data"</span>);
+
+<span class="cmt">// 2) 全部加载完成后，把 mmap 中“未使用”的区间解除映射</span>
+<span class="kw">if</span> (size_done &gt;= size_data) {
+    <span class="kw">for</span> (...) {
+        mapping-&gt;unmap_fragment(0, mmap_used.first);
+        <span class="kw">if</span> (mmap_used.second != 0) mapping-&gt;unmap_fragment(mmap_used.second, mapping-&gt;size());
+    }
+    <span class="kw">if</span> (progress_callback) <span class="kw">return</span> progress_callback(1.0f, user_data);  <span class="cmt">// 允许最后一次取消</span>
+}
+<span class="kw">return</span> true;</code></pre>
+<div class="note">这是“懒加载”的体现：mmap 模式下只把真正用到的区间保留映射，其余在加载完成后释放，降低虚拟内存压力。</div>
+</section>
+
+<section id="s9">
+<h2>9. 错误处理与生命周期</h2>
+<table>
+  <tr><th>返回/异常</th><th>含义</th><th>处理位置</th></tr>
+  <tr><td><code>status == 0</code></td><td>成功</td><td><code>llama_model_load</code> 返回 0</td></tr>
+  <tr><td><code>status == -1</code></td><td>加载异常（GGUF 损坏、形状不符、未知架构等）</td><td><code>catch (std::exception)</code>，impl 中 <code>llama_model_free(model)</code></td></tr>
+  <tr><td><code>status == -2</code></td><td>被 <code>progress_callback</code> 取消</td><td><code>load_tensors</code> 返回 false / <code>load_all_data</code> 返回 false，impl 中释放</td></tr>
+  <tr><td><code>return nullptr</code>（impl）</td><td>参数/设备非法或加载失败</td><td>调用方需判空</td></tr>
+</table>
+<ul>
+  <li>成功时返回 <code>llama_model *</code>，<strong>由调用方负责 <code>llama_model_free()</code></strong>（<code>src/llama-model.cpp:9096</code> 即 <code>delete model</code>）。</li>
+  <li><code>llama_model</code> 的析构会释放 LoRA；<code>pimpl</code> 中的 <code>ctxs_bufs</code>、<code>mappings</code>、<code>mlock_*</code> 通过智能指针/容器自动释放。</li>
+  <li>加载中创建的 <code>ggml_context</code>、backend buffer、mmap 都通过 <code>pimpl</code> 持有，保证与模型同生命周期。</li>
+</ul>
+</section>
+
+<section id="s10">
+<h2>10. 关键数据结构速查</h2>
+<table>
+  <tr><th>结构</th><th>位置</th><th>作用</th></tr>
+  <tr><td><code>llama_model_params</code></td><td><code>include/llama.h:286</code></td><td>加载参数（设备、GPU 层数、mmap、回调等）</td></tr>
+  <tr><td><code>llama_model</code></td><td><code>src/llama-model.h</code></td><td>模型对象：<code>arch</code>、<code>hparams</code>、<code>vocab</code>、<code>layers</code>、<code>devices</code>、<code>pimpl</code></td></tr>
+  <tr><td><code>llama_model::impl</code></td><td><code>src/llama-model.cpp</code></td><td>持有 <code>ctxs_bufs</code>、<code>mappings</code>、<code>cpu/gpu_buft_list</code>、<code>dev_input/dev_layer/dev_output</code></td></tr>
+  <tr><td><code>llama_model_loader</code></td><td><code>src/llama-model-loader.h:31</code></td><td>GGUF 解析结果：<code>metadata</code>、<code>files</code>、<code>contexts</code>、<code>weights_map</code>、<code>ctx_map</code></td></tr>
+  <tr><td><code>llama_tensor_weight</code></td><td><code>src/llama-model-loader.h:33</code></td><td>张量来源：文件索引 <code>idx</code>、偏移 <code>offs</code>、元数据 <code>tensor</code></td></tr>
+  <tr><td><code>llama_hparams</code></td><td><code>src/llama-hparams.h</code></td><td>超参：<code>n_ctx_train</code>、<code>n_embd</code>、<code>n_layer</code>、<code>n_head</code>、RoPE 等</td></tr>
+  <tr><td><code>llama_vocab</code></td><td><code>src/llama-vocab.h</code></td><td>分词器：<code>id_to_token</code>、<code>token_to_id</code>、special tokens</td></tr>
+</table>
+</section>
+
+<section id="s11">
+<h2>11. 时序图（ASCII）</h2>
+<pre class="callgraph">调用方
+  │ llama_model_load_from_file(path, params)
+  ▼
+llama_model_load_from_file_impl
+  │ 1. 校验 metadata/path/file 三选一
+  │ 2. ggml_time_init + backend 检查
+  │ 3. 安装默认 progress_callback
+  │ 4. new llama_model(params)
+  │ 5. 构建设备列表 (devices / 自动 / split_mode / main_gpu)
+  ▼
+llama_model_load
+  │ 6. llama_model_loader 构造
+  │      ├─ gguf_init_from_file(no_alloc)
+  │      ├─ 读 general.architecture → llm_arch
+  │      ├─ 处理 mmap/direct_io
+  │      ├─ 建 weights_map（偏移 + 越界校验）
+  │      ├─ 加载分片 (n_split)
+  │      └─ 推断 ftype + 打印 KV
+  │ 7. load_arch
+  │ 8. load_hparams
+  │ 9. (CLIP 拒绝)
+  │10. load_vocab
+  │11. load_stats + print_info
+  │12. vocab_only? ──是──▶ 返回 0
+  │13. load_tensors
+  │      ├─ 建 cpu/gpu buft 列表
+  │      ├─ 计算 split 比例
+  │      ├─ 层 → 设备分配
+  │      ├─ switch(arch) 创建张量骨架 (create_tensor)
+  │      ├─ done_getting_tensors (数量校验)
+  │      ├─ init_mappings
+  │      ├─ 按 buft 分配 buffer（mmap 零拷贝 / alloc_ctx_tensors / dummy）
+  │      └─ load_all_data（mmap / host read / async upload）
+  ▼
+返回 llama_model*  ──▶ 调用方后续 llama_model_free()</pre>
+</section>
+
+<section id="s12">
+<h2>12. 阅读建议（按关注点）</h2>
+<ul>
+  <li><strong>只想理解整体</strong>：第 0、2、3、11 节即可。</li>
+  <li><strong>关注 GGUF/分片解析</strong>：第 4 节 + <code>src/llama-model-loader.h</code>。</li>
+  <li><strong>关注 GPU offload/多卡切分</strong>：第 2.5、6.1–6.3 节。</li>
+  <li><strong>关注张量创建与 buffer 选择</strong>：第 6.4、6.6、7 节。</li>
+  <li><strong>关注权重搬运性能（mmap/异步）</strong>：第 8 节。</li>
+  <li><strong>关注词表</strong>：第 5.3 节 + <code>src/llama-vocab.cpp:1749</code>。</li>
+</ul>
+<div class="note">
+  <strong>备注</strong>：本文件是对现有源码的学习性梳理，不修改任何代码。若源码行号随上游更新发生变化，请以函数名为锚点（如 <code>llama_model_load_from_file_impl</code>、<code>llama_model::load_tensors</code>）重新定位。
+</div>
+</section>
+
+</main>
+</div>
+</body>
+</html>
