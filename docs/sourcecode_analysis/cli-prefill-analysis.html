@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llama-cli prefill 阶段源码分析</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a22;
+    --panel-2: #1e222c;
+    --fg: #d7dae0;
+    --muted: #8b93a7;
+    --accent: #7aa2f7;
+    --accent-2: #9ece6a;
+    --border: #2a2f3a;
+    --code-bg: #11141b;
+    --warn: #e0af68;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .layout { display: flex; max-width: 1400px; margin: 0 auto; }
+  nav {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 250px; flex: 0 0 250px;
+    height: 100vh; overflow-y: auto;
+    padding: 28px 18px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+  }
+  nav h2 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+  nav a { display: block; color: var(--muted); text-decoration: none; font-size: 13px; padding: 4px 8px; border-radius: 5px; }
+  nav a:hover { color: var(--fg); background: var(--panel-2); }
+  main { flex: 1 1 auto; min-width: 0; padding: 40px 48px 100px; }
+  header.hero { border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 32px; }
+  h1 { font-size: 30px; line-height: 1.3; margin: 0 0 10px; color: #fff; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .sub code { color: var(--accent-2); }
+  h2 { font-size: 22px; margin: 44px 0 14px; padding-top: 10px; border-top: 1px solid var(--border); color: #fff; }
+  h2:first-of-type { border-top: none; }
+  h3 { font-size: 17px; margin: 26px 0 10px; color: var(--accent); }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  code {
+    font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--panel-2);
+    padding: 2px 5px;
+    border-radius: 4px;
+    color: #c0caf5;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre code { background: none; padding: 0; color: #c3cbe0; font-size: 13px; }
+  .file { color: var(--muted); font-size: 12px; margin-bottom: 6px; font-family: ui-monospace, monospace; }
+  .callout {
+    border-left: 3px solid var(--warn);
+    background: rgba(224, 175, 104, .08);
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+  }
+  .callout.good { border-left-color: var(--accent-2); background: rgba(158, 206, 106, .08); }
+  .callout.info { border-left-color: var(--accent); background: rgba(122, 162, 247, .08); }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  tr:hover td { background: var(--panel); }
+  .chain {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    white-space: pre;
+    overflow-x: auto;
+    color: #c3cbe0;
+  }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--panel-2); color: var(--accent); border: 1px solid var(--border); vertical-align: middle; }
+  .step { color: var(--accent-2); font-weight: 600; }
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+  @media (max-width: 900px) {
+    nav { display: none; }
+    main { padding: 24px 18px 80px; }
+    h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h2>目录</h2>
+  <a href="#conclusion">结论</a>
+  <a href="#s1">1. 输入与模板渲染</a>
+  <a href="#s2">2. 构造任务并投递</a>
+  <a href="#s3">3. 队列调度</a>
+  <a href="#s4">4. CLI 专用 tokenize</a>
+  <a href="#s5">5. 分配 slot</a>
+  <a href="#s6">6. prefill 准备</a>
+  <a href="#s7">7. 填充 llama_batch</a>
+  <a href="#s8">8. DONE_PROMPT</a>
+  <a href="#s9">9. llama_decode</a>
+  <a href="#s10">10. 首 token 采样</a>
+  <a href="#s11">11. 流式回传</a>
+  <a href="#structs">关键数据结构</a>
+  <a href="#timeline">时序总览</a>
+  <a href="#tuning">调优参数</a>
+  <a href="#summary">一句话总结</a>
+</nav>
+
+<main>
+<header class="hero">
+  <h1>llama-cli 的 prefill 阶段源码分析</h1>
+  <div class="sub">
+    分析对象：<code>tools/cli/cli.cpp</code>（commit <code>0a2d12fcc</code>）<br>
+    相关文件：<code>tools/server/server-context.cpp</code>、<code>server-queue.cpp</code>、<code>server-common.cpp</code>、<code>common/common.cpp</code>、<code>src/llama-context.cpp</code>
+  </div>
+</header>
+
+<h2 id="conclusion">0. 先给结论</h2>
+<p>
+  <code>cli.cpp</code> 本身<strong>不直接调用 <code>llama_decode()</code></strong>。它复用 server 的推理引擎（<code>server_context</code> / <code>server_context_impl</code>）：
+</p>
+<ul>
+  <li><code>cli.cpp</code> 负责：读取用户输入 → 套 chat template 生成 prompt 字符串 → 构造 <code>SERVER_TASK_TYPE_COMPLETION</code> 任务 → 投递队列 → 消费流式结果。</li>
+  <li>真正的 <strong>prefill（prompt 处理）</strong> 在 <code>tools/server/server-context.cpp</code> 的 <code>update_slots()</code> 中：把 prompt token 组进 <code>llama_batch</code>，再调用 <code>llama_decode()</code>。</li>
+  <li>CLI 与 server 的唯一区别是任务上打了 <code>task.cli = true</code>，于是服务端在 <code>process_single_task()</code> 里先做一次 CLI 专用 tokenize。</li>
+</ul>
+
+<div class="chain">tools/cli/cli.cpp
+  main()
+    └─ cli_context::generate_completion()              cli.cpp:75
+         ├─ format_chat()                              cli.cpp:197
+         │    └─ common_chat_templates_apply()         cli.cpp:215   ← 生成 prompt 字符串
+         ├─ 构造 server_task(COMPLETION), cli=true     cli.cpp:80
+         └─ rd.post_task()                             cli.cpp:113   ← 投递任务
+              │
+tools/server/server-queue.cpp
+  server_queue::start_loop()                           server-queue.cpp:125
+    ├─ callback_new_task → process_single_task()       server-context.cpp:1833
+    │    ├─ tokenize_cli_input()                       server-context.cpp:1738
+    │    │    └─ tokenize_input_prompts()              server-common.cpp:793
+    │    └─ launch_slot_with_task()                    server-context.cpp:1217
+    │         └─ slot.state = SLOT_STATE_STARTED
+    └─ callback_update_slots → update_slots()          server-context.cpp:2118
+         ├─ STARTED → PROCESSING_PROMPT                server-context.cpp:2266
+         ├─ prompt cache 复用 / KV shift / checkpoint  server-context.cpp:2342-2494
+         ├─ 逐 token 填入 llama_batch                  server-context.cpp:2627
+         ├─ DONE_PROMPT, 只取最后一个 logits           server-context.cpp:2678
+         └─ llama_decode(ctx, batch_view)              server-context.cpp:2788
+              └─ llama_context::decode()               src/llama-context.cpp:1533</div>
+
+<!-- 1 -->
+<h2 id="s1">阶段 1：输入 → chat template → prompt 字符串</h2>
+<p>入口在交互主循环 <code>main()</code>：</p>
+<div class="file">tools/cli/cli.cpp:602-610</div>
+<pre><code>if (add_user_msg) {
+    ctx_cli.messages.push_back({ {"role","user"}, {"content", cur_msg} });
+    cur_msg.clear();
+}
+result_timings timings;
+std::string assistant_content = ctx_cli.generate_completion(timings);</code></pre>
+
+<p><code>generate_completion()</code> 第一件事是把对话消息套上模板：</p>
+<div class="file">tools/cli/cli.cpp:197-215（节选）</div>
+<pre><code>common_chat_params format_chat() {
+    auto meta = ctx_server.get_meta();
+    auto &amp; chat_params = meta.chat_params;
+
+    common_chat_templates_inputs inputs;
+    inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
+    inputs.add_generation_prompt = true;
+    inputs.use_jinja             = chat_params.use_jinja;
+
+    return common_chat_templates_apply(chat_params.tmpls.get(), inputs);
+}</code></pre>
+
+<div class="callout info">
+  <strong>产物：</strong><code>chat_params.prompt</code> 是一整段纯文本（已包含 BOS、系统提示、角色标记、<code>add_generation_prompt</code> 等）。它还不是 token，只是字符串。
+</div>
+
+<!-- 2 -->
+<h2 id="s2">阶段 2：构造任务并投递（cli 与 server 的分叉点）</h2>
+<div class="file">tools/cli/cli.cpp:76-113（节选）</div>
+<pre><code>server_response_reader rd = ctx_server.get_response_reader();
+auto chat_params = format_chat();
+{
+    server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
+    task.id         = rd.get_new_id();
+    task.index      = 0;
+    task.params     = defaults;           // 采样参数等
+    task.cli_prompt = chat_params.prompt; // 字符串 prompt
+    task.cli_files  = input_files;        // 图片/音频
+    task.cli        = true;               // ← 关键：标记为 CLI 输入
+    ...
+    rd.post_task({std::move(task)});
+}</code></pre>
+
+<p>要点：</p>
+<ol>
+  <li><code>task.cli_prompt</code> 是<strong>原始字符串</strong>，服务端还没 tokenize。</li>
+  <li><code>task.cli = true</code> 决定后面走 <code>tokenize_cli_input()</code> 分支。</li>
+  <li><code>post_task()</code> 把任务放进 <code>server_queue</code>；<code>rd</code>（<code>server_response_reader</code>）之后按 id 收结果。</li>
+  <li>真正的模型推理跑在另一个线程里：</li>
+</ol>
+
+<div class="file">tools/cli/cli.cpp:388-390</div>
+<pre><code>std::thread inference_thread([&amp;ctx_cli]() {
+    ctx_cli.ctx_server.start_loop();
+});</code></pre>
+<p><code>server_context::start_loop()</code> 只是转发到 <code>server_queue::start_loop()</code>（<code>server-context.cpp:3078</code>）。</p>
+
+<!-- 3 -->
+<h2 id="s3">阶段 3：队列调度（每轮 = 收任务 + 跑一次 update_slots）</h2>
+<div class="file">tools/server/server-queue.cpp:139-163（节选）</div>
+<pre><code>while (true) {
+    while (true) {
+        ...
+        server_task task = std::move(queue_tasks.front());
+        queue_tasks.pop_front();
+        callback_new_task(std::move(task));   // → process_single_task()
+    }
+    callback_update_slots();                  // → update_slots()，真正推理
+    ...
+}</code></pre>
+
+<p>回调在 <code>server-context.cpp:978-982</code> 注册：</p>
+<pre><code>queue_tasks.on_new_task([this](server_task &amp;&amp; task) {
+    process_single_task(std::move(task));
+});
+queue_tasks.on_update_slots([this]() {
+    update_slots();
+});</code></pre>
+
+<div class="callout">
+  模型是<strong>按“调度轮次”推进</strong>的：新任务先登记到某个 slot，下一轮 <code>update_slots()</code> 才开始 prefill。
+</div>
+
+<!-- 4 -->
+<h2 id="s4">阶段 4：CLI 专用 tokenize</h2>
+<p><code>process_single_task()</code> 对 CLI 任务先做 tokenize：</p>
+<div class="file">tools/server/server-context.cpp:1833-1846（节选）</div>
+<pre><code>void process_single_task(server_task &amp;&amp; task) {
+    switch (task.type) {
+        case SERVER_TASK_TYPE_COMPLETION:
+            ...
+            if (task.cli) {
+                if (!tokenize_cli_input(task)) {
+                    break;
+                }
+            }</code></pre>
+
+<div class="file">tools/server/server-context.cpp:1738-1753</div>
+<pre><code>bool tokenize_cli_input(server_task &amp; task) {
+    try {
+        auto &amp; prompt = task.cli_prompt;
+        if (mctx != nullptr) {
+            task.tokens = process_mtmd_prompt(mctx, prompt, task.cli_files); // 多模态
+        } else {
+            task.tokens = std::move(tokenize_input_prompts(vocab, mctx, prompt, true, true)[0]);
+        }
+        task.cli_prompt.clear();
+        task.cli_files.clear();
+    } catch (...) { ... }
+    return true;
+}</code></pre>
+
+<ul>
+  <li><code>add_special = true</code>、<code>parse_special = true</code>：会加 BOS/EOS 类特殊 token，并解析 prompt 里的特殊 token 文本。</li>
+  <li>结果存进 <code>task.tokens</code>（<code>server_tokens</code>，内部是 <code>llama_tokens</code> + 多模态索引表，见 <code>server-common.h:128-227</code>）。</li>
+  <li>之后 <code>slot.task-&gt;n_tokens()</code> 就等于这段 token 数。</li>
+</ul>
+
+<!-- 5 -->
+<h2 id="s5">阶段 5：分配 slot 并“挂载”任务</h2>
+<div class="file">tools/server/server-context.cpp:1851-1887（节选）</div>
+<pre><code>server_slot * slot = id_slot != -1 ? get_slot_by_id(id_slot) : get_available_slot(task);
+if (slot == nullptr) { queue_tasks.defer(...); break; }
+...
+} else if (!launch_slot_with_task(*slot, std::move(task))) { ... }</code></pre>
+
+<p><code>launch_slot_with_task()</code>（<code>server-context.cpp:1217</code>）做 prefill 前的准备：</p>
+<ol>
+  <li>LoRA / aLoRA 处理（<code>1219-1281</code>）；aLoRA 会记录 <code>alora_invocation_start</code>，影响后面能缓存到哪。</li>
+  <li>token 合法性检查：<code>task.tokens.validate(ctx)</code>（<code>1283</code>）。</li>
+  <li>初始化采样器 <code>common_sampler_init(...)</code>，必要时设置 backend sampling（<code>1291-1319</code>）。</li>
+  <li>把 task 移入 slot 并设置初始状态（<code>1324-1328</code>）：</li>
+</ol>
+
+<pre><code>slot.task  = std::make_unique&lt;const server_task&gt;(std::move(task));
+slot.state = slot.task-&gt;is_child()
+    ? SLOT_STATE_WAIT_OTHER   // 子任务等父任务先 prefill
+    : SLOT_STATE_STARTED;     // 父任务从这里开始 prefill</code></pre>
+
+<div class="callout">此时<strong>还没算任何东西</strong>，只是“任务已绑定到 slot”。真正的计算在下一轮 <code>update_slots()</code>。</div>
+
+<!-- 6 -->
+<h2 id="s6">阶段 6：update_slots() 的 prefill 前半段（准备）</h2>
+<p><code>update_slots()</code> 是 server 的核心循环（<code>server-context.cpp:2118</code>）。每轮它把当前所有 slot 的工作组装成一个（或多个）<code>llama_batch</code>，然后 decode 一次。</p>
+
+<h3>6.1 状态切换与计时起点</h3>
+<div class="file">tools/server/server-context.cpp:2259-2273（节选）</div>
+<pre><code>if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
+    const auto &amp; input_tokens = slot.task-&gt;tokens;   // 目标 prompt
+    ...
+    if (slot.state == SLOT_STATE_STARTED) {
+        slot.t_start_process_prompt = ggml_time_us();   // prefill 计时开始
+        slot.t_start_generation     = 0;
+        slot.state = SLOT_STATE_PROCESSING_PROMPT;
+        SLT_INF(slot, "new prompt, n_ctx_slot = %d, ... task.n_tokens = %d\n", ...);
+    }</code></pre>
+
+<h3>6.2 prompt cache 复用（同一 session 第二轮会命中）</h3>
+<p>若 <code>cache_prompt</code> 打开，先求新旧 prompt 的公共前缀：</p>
+<div class="file">tools/server/server-context.cpp:2342-2360（节选）</div>
+<pre><code>if (slot.task-&gt;params.cache_prompt) {
+    // 复用与新 prompt 相同的历史 token
+    n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
+
+    if (slot.alora_invocation_start &gt; 0) {
+        n_past = std::min(n_past, slot.alora_invocation_start - 1);
+    }
+    ...
+}</code></pre>
+<p><code>n_past</code> = 已经存在于 KV cache 中、可以跳过的 token 数。</p>
+
+<h3>6.3 n_cache_reuse：KV cache 片段平移</h3>
+<p>当问题是“中间相同、结尾不同”时，可以把旧 KV 片段 shift 到新位置复用（<code>2363-2409</code>）：</p>
+<pre><code>const int64_t kv_shift = (int64_t) head_p - (int64_t) head_c;
+llama_memory_seq_rm (llama_get_memory(ctx), slot.id, head_p, head_c);
+llama_memory_seq_add(llama_get_memory(ctx), slot.id, head_c, head_c + n_match, kv_shift);</code></pre>
+
+<h3>6.4 checkpoint 恢复</h3>
+<p>若前缀不再完整匹配、但 SWA 场景下旧 checkpoint 仍可用，会恢复上下文快照：</p>
+<div class="file">tools/server/server-context.cpp:2491-2494</div>
+<pre><code>const size_t n = llama_state_seq_set_data_ext(ctx, it-&gt;data.data(), checkpoint_size,
+                                              slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);</code></pre>
+
+<h3>6.5 超长 prompt 的截断 / 清理</h3>
+<p>填充 batch 之前还有若干保护（<code>2550-2570</code> 附近）：<code>task-&gt;n_tokens()</code> 超过 <code>n_batch</code> 需要分批；超过上下文则报错或按策略截断，并可能 <code>slot.prompt_clear(true)</code> 重置。</p>
+
+<!-- 7 -->
+<h2 id="s7">阶段 7：把 prompt token 填进 llama_batch</h2>
+<p>这是 prefill 的核心“装箱”步骤：</p>
+<div class="file">tools/server/server-context.cpp:2626-2672（节选，有删减）</div>
+<pre><code>// add prompt tokens for processing in the current batch
+while (slot.prompt.n_tokens() &lt; slot.task-&gt;n_tokens() &amp;&amp; batch.n_tokens &lt; n_batch) {
+    llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
+    if (cur_tok == LLAMA_TOKEN_NULL) {
+        break; // 遇到多模态 chunk，稍后单独处理
+    }
+    ...
+    // 嵌入任务要求所有 token 都输出
+    common_batch_add(batch,
+        cur_tok,
+        slot.prompt.tokens.pos_next(),
+        { slot.id },
+        slot.task-&gt;need_embd());
+    slot.prompt.tokens.push_back(cur_tok);
+
+    slot.n_prompt_tokens_processed++;
+    ...
+}</code></pre>
+
+<ul>
+  <li><strong>每次最多 <code>n_batch</code> 个 token</strong>（逻辑 batch 上限）。超长 prompt 会自动分成多轮 <code>update_slots()</code>，每轮 decode 一批。</li>
+  <li><code>slot.prompt.tokens</code> 记录“已经送进模型的 token”；<code>slot.prompt.n_tokens()</code> 就是进度指针。</li>
+  <li><code>pos</code> 用 <code>slot.prompt.tokens.pos_next()</code>，对多模态（M-RoPE）也能正确处理位置不连续。</li>
+  <li><code>common_batch_add()</code>（<code>common/common.cpp:1511</code>）只写指针数组并自增 <code>batch.n_tokens</code>，非常轻量。</li>
+</ul>
+
+<h3>多模态分支</h3>
+<p>遇到 <code>LLAMA_TOKEN_NULL</code> 表示此处是图片/音频 chunk：</p>
+<div class="file">tools/server/server-context.cpp:2604-2624（节选）</div>
+<pre><code>while (slot.prompt.n_tokens() &lt; slot.task-&gt;n_tokens() &amp;&amp; input_tokens[slot.prompt.n_tokens()] == LLAMA_TOKEN_NULL) {
+    int32_t res = input_tokens.process_chunk(ctx, mctx, slot.prompt.n_tokens(),
+                                             slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
+    ...
+    slot.n_prompt_tokens_processed += n_tokens_out;
+    slot.prompt.tokens.push_back(chunk.get());
+}</code></pre>
+<p><code>process_chunk()</code> 内部会跑视觉/音频编码器，把 embedding 写进上下文，因此这部分也属于广义 prefill。</p>
+
+<!-- 8 -->
+<h2 id="s8">阶段 8：整段 prompt 装完 → DONE_PROMPT</h2>
+<div class="file">tools/server/server-context.cpp:2674-2690（节选）</div>
+<pre><code>const auto n_tokens_cur = batch.n_tokens - n_tokens_prev;
+
+// entire prompt has been processed
+if (slot.prompt.n_tokens() == slot.task-&gt;n_tokens()) {
+    slot.state = SLOT_STATE_DONE_PROMPT;
+
+    GGML_ASSERT(batch.n_tokens &gt; 0);
+
+    // extract the logits only for the last token
+    batch.logits[batch.n_tokens - 1] = true;
+
+    slot.n_decoded = 0;
+    slot.i_batch   = batch.n_tokens - 1;
+
+    slot.init_sampler();
+    SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", ...);
+}</code></pre>
+
+<p>这是 prefill 与 generation 的分界点：</p>
+<ul>
+  <li>prefill 期间只有<strong>最后一个 prompt token</strong> 需要 logits（<code>batch.logits[last] = true</code>），其余 token 只更新 KV。</li>
+  <li><code>slot.i_batch</code> 记录“这个 slot 的 logits 在 batch 中的下标”，decode 之后靠它取结果。</li>
+  <li>如果 prompt 还没装完（<code>else</code> 分支，<code>2691-2714</code>），状态保持 <code>PROCESSING_PROMPT</code>，下一轮继续。</li>
+</ul>
+
+<p>装批过程中可能顺便创建 KV checkpoint（<code>2731-2733</code>），给后续 prompt 复用 / 投机解码回滚用：</p>
+<pre><code>if (do_checkpoint) {
+    create_checkpoint(slot, n_tokens_cur, pos_min, pos_max);
+}</code></pre>
+
+<!-- 9 -->
+<h2 id="s9">阶段 9：真正的前向计算 —— llama_decode()</h2>
+<div class="file">tools/server/server-context.cpp:2746-2788（节选）</div>
+<pre><code>SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
+
+if (slot_batched) {
+    common_set_adapter_lora(ctx, slot_batched-&gt;lora);
+    ...
+    llama_set_embeddings(ctx, slot_batched-&gt;task-&gt;need_embd());
+}
+
+int32_t i_next = 0;
+for (int32_t i = 0; i &lt; batch.n_tokens; i = i_next) {
+    const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
+
+    llama_batch batch_view = {
+        n_tokens,
+        batch.token    + i,
+        nullptr,
+        batch.pos      + i,
+        batch.n_seq_id + i,
+        batch.seq_id   + i,
+        batch.logits   + i,
+    };
+
+    const int ret = llama_decode(ctx, batch_view);
+    metrics.on_decoded(slots);
+    ...
+}</code></pre>
+
+<ol>
+  <li>传入的是 <code>batch_view</code>（batch 的切片），不是整个 batch。物理层还会被 <code>llama_context::decode()</code> 按 <code>n_ubatch</code> 再切。</li>
+  <li><code>n_batch</code>（逻辑批）与 <code>n_ubatch</code>（物理批）不同：<strong>prompt 装箱用 <code>n_batch</code> 控制，真正图执行用 <code>n_ubatch</code> 切</strong>。</li>
+  <li>返回值：<code>0</code> 成功；<code>1</code> KV cache 找不到空位 / 上下文超限 → server 把 <code>n_batch</code> 减半重试或清理空闲 slot（<code>2831-2838</code>）；<code>-1</code> 非法输入批；<code>&lt;-1</code> 计算错误（<code>2792-2829</code>）。</li>
+</ol>
+
+<h3>下探到 llama_context</h3>
+<div class="file">src/llama-context.cpp:3451</div>
+<pre><code>int32_t llama_decode(llama_context * ctx, llama_batch batch) {
+    const int ret = ctx-&gt;decode(batch);
+    ...
+    return ret;
+}</code></pre>
+
+<p><code>llama_context::decode()</code>（<code>src/llama-context.cpp:1533</code>）内部主要做：</p>
+<ol>
+  <li>参数/批次校验，处理 embeddings 输出、backend sampling；</li>
+  <li>申请 KV cache 槽位（memory module），必要时做 cache defrag/optimize；</li>
+  <li>按 <code>n_ubatch</code> 逐个 <code>process_ubatch()</code>（<code>src/llama-context.cpp:1692</code>）：构建计算图（<code>LLM_GRAPH_TYPE_DECODER</code>）、调度 ggml 后端执行、把 K/V 写回 <code>llama_memory</code>、按 <code>batch.logits</code> 把需要的 logits 写入输出缓冲；</li>
+  <li>失败时回滚对应位置的 KV，并返回错误码。</li>
+</ol>
+<p>对 prefill 来说，这里就是“一次性把这段 prompt 的 KV 算出来”。</p>
+
+<!-- 10 -->
+<h2 id="s10">阶段 10：decode 之后 —— 首 token 采样与计时</h2>
+<div class="file">tools/server/server-context.cpp:2870-2931（节选）</div>
+<pre><code>if (slot.i_batch &lt; (int) i || slot.i_batch &gt;= (int) (i + n_tokens)) {
+    continue;
+}
+
+if (slot.state == SLOT_STATE_DONE_PROMPT) {
+    ...
+    slot.state = SLOT_STATE_GENERATING;
+
+    if (slot.can_speculate()) {
+        common_speculative_begin(slot.spec.get(), slot.prompt.tokens.get_text_tokens());
+    }
+}
+...
+const int tok_idx = slot.i_batch - i;
+llama_token id = common_sampler_sample(slot.smpl.get(), slot.ctx, tok_idx);
+...
+slot.n_decoded += 1;
+
+if (slot.n_decoded == 1) {
+    slot.t_start_generation   = t_current;
+    slot.t_prompt_processing  = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
+    metrics.on_prompt_eval(slot);   // 统计 prompt eval 吞吐
+}</code></pre>
+
+<ul>
+  <li>prefill 的<strong>产物</strong>就是最后一个 prompt token 的 logits；</li>
+  <li>用它在 <code>GENERATING</code> 状态下采出第一个生成 token；</li>
+  <li><code>t_prompt_processing</code> 在这一刻定格，后面都是 decode/generation 的计时。</li>
+</ul>
+
+<!-- 11 -->
+<h2 id="s11">阶段 11：结果流式回传 CLI</h2>
+<p>生成 token 时：</p>
+<div class="file">tools/server/server-context.cpp:1337-1382（节选）</div>
+<pre><code>slot.add_token(result);
+if (slot.task-&gt;params.stream) {
+    send_partial_response(slot, result, false);   // → queue_results.send()
+}</code></pre>
+
+<p>CLI 侧同步消费：</p>
+<div class="file">tools/cli/cli.cpp:122-173（节选）</div>
+<pre><code>console::spinner::start();
+server_task_result_ptr result = rd.next(should_stop);
+
+while (result) {
+    ...
+    auto res_partial = dynamic_cast&lt;server_task_result_cmpl_partial *&gt;(result.get());
+    if (res_partial) {
+        out_timings = std::move(res_partial-&gt;timings);
+        for (const auto &amp; diff : res_partial-&gt;oaicompat_msg_diffs) {
+            ... console::log("%s", diff.content_delta.c_str()); ...
+        }
+    }
+    auto res_final = dynamic_cast&lt;server_task_result_cmpl_final *&gt;(result.get());
+    if (res_final) {
+        out_timings = std::move(res_final-&gt;timings);
+        break;
+    }
+    result = rd.next(should_stop);
+}</code></pre>
+
+<p>最后 <code>main()</code> 打印用户看到的速度：</p>
+<div class="file">tools/cli/cli.cpp:617-621</div>
+<pre><code>console::log("[ Prompt: %.1f t/s | Generation: %.1f t/s ]\n",
+             timings.prompt_per_second, timings.predicted_per_second);</code></pre>
+<p>其中 <code>prompt_per_second</code> 来自 slot 的 <code>t_prompt_processing</code> / <code>n_prompt_tokens_processed</code>（<code>server-context.cpp:435-440</code>）。</p>
+
+<!-- structs -->
+<h2 id="structs">关键数据结构对照</h2>
+<table>
+  <thead><tr><th>结构</th><th>位置</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>server_task</code></td><td><code>tools/server/server-task.h</code></td><td>一次请求（CLI 时带 <code>cli_prompt</code>、<code>cli=true</code>）</td></tr>
+    <tr><td><code>server_task::tokens</code></td><td><code>server_tokens</code></td><td>tokenize 后的 prompt（含多模态索引）</td></tr>
+    <tr><td><code>server_slot</code></td><td><code>server-context.cpp:82</code> 起</td><td>一个并行序列的运行时状态，持有 <code>prompt</code>、<code>task</code>、<code>smpl</code></td></tr>
+    <tr><td><code>server_slot::prompt</code></td><td><code>server_prompt</code></td><td>“已送进模型的 token + KV checkpoint 元数据”</td></tr>
+    <tr><td><code>slot.prompt.tokens</code></td><td><code>server_tokens</code></td><td>已处理 token 的追加记录，兼作进度指针</td></tr>
+    <tr><td><code>llama_batch</code></td><td><code>include/llama.h</code></td><td>本轮到 <code>llama_decode</code> 的 token/pos/seq_id/logits 数组</td></tr>
+    <tr><td><code>n_batch</code> / <code>n_ubatch</code></td><td><code>llama_n_batch()</code> / <code>llama_n_ubatch()</code></td><td>逻辑批 / 物理批</td></tr>
+    <tr><td><code>llama_memory</code></td><td><code>llama_get_memory(ctx)</code></td><td>KV cache（含 SWA / recurrent 的实现细节）</td></tr>
+  </tbody>
+</table>
+
+<h3>prefill 的进度判定</h3>
+<pre><code>slot.prompt.n_tokens()   // 已处理的 token 数
+slot.task-&gt;n_tokens()    // 目标 prompt 总 token 数</code></pre>
+<p>两者相等 → prefill 结束；否则下一轮 <code>update_slots()</code> 继续。<strong>不要</strong>把 <code>batch.n_tokens</code> 当成 prompt 总长度，它只是当前这一批的大小。</p>
+
+<!-- timeline -->
+<h2 id="timeline">时序总览（单轮对话）</h2>
+<div class="chain">用户输入
+  │
+  ├─ cli.cpp: format_chat() → prompt 字符串
+  ├─ cli.cpp: post_task(COMPLETION, cli=true)
+  │
+  └─ 推理线程 server_queue::start_loop()
+       │
+       ├─ process_single_task()
+       │    ├─ tokenize_cli_input() → task.tokens
+       │    └─ launch_slot_with_task() → state=STARTED
+       │
+       └─ update_slots()
+            ├─ STARTED → PROCESSING_PROMPT
+            ├─ cache_prompt: get_common_prefix() → n_past
+            ├─ 填 batch（≤ n_batch 个 token/轮）
+            ├─ 装完 → DONE_PROMPT，logits[last]=true
+            ├─ llama_decode() → llama_context::decode() → process_ubatch()
+            └─ 采样首 token → GENERATING → 流式返回
+  │
+  └─ cli.cpp: rd.next() 打印 content_delta / timings</div>
+
+<!-- tuning -->
+<h2 id="tuning">调优参数（与 prefill 直接相关）</h2>
+<table>
+  <thead><tr><th>参数</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td><code>-b/--batch-size</code>（<code>n_batch</code>）</td><td>每轮最多处理多少 prompt token；越大 prefill 轮数越少，但显存峰值越高</td></tr>
+    <tr><td><code>-ub/--ubatch-size</code>（<code>n_ubatch</code>）</td><td>真正图执行的物理批；影响单次 kernel / 显存占用</td></tr>
+    <tr><td><code>--cache-prompt</code> / <code>cache_prompt</code></td><td>是否复用历史 prompt 的 KV（多轮对话提速关键）</td></tr>
+    <tr><td><code>--cache-reuse N</code>（<code>n_cache_reuse</code>）</td><td>旧 KV 片段平移复用（中间相同、结尾不同时有效）</td></tr>
+    <tr><td><code>--no-context-shift</code></td><td>影响上下文满时的截断策略（prefill 前会检查）</td></tr>
+    <tr><td><code>--swa-full</code> / <code>n_ctx_checkpoints</code></td><td>与 SWA checkpoint 恢复相关</td></tr>
+    <tr><td><code>-np/--parallel</code>、<code>--cont-batching</code></td><td>多 slot 时能否把多个 prompt 合并进同一批 prefill</td></tr>
+  </tbody>
+</table>
+
+<!-- summary -->
+<h2 id="summary">一句话总结</h2>
+<div class="callout good">
+  <code>cli.cpp</code> 的 prefill 不是本地循环，而是“<strong>把 chat 模板渲染成字符串 → 打成 COMPLETION 任务 → 由 server_context 的 <code>update_slots()</code> 做 prompt 装箱 → <code>llama_decode()</code> 一次性算完 prompt 的 KV → 只取最后一个 logits 采首 token</strong>”。理解这条链的关键分界点是 <code>SLOT_STATE_DONE_PROMPT</code> 和 <code>batch.logits[last] = true</code>。
+</div>
+
+<footer>
+  本文基于仓库当前 commit <code>0a2d12fcc</code> 生成。行号可能随上游迭代变化，检索时优先按函数名（<code>generate_completion</code>、<code>process_single_task</code>、<code>update_slots</code>、<code>launch_slot_with_task</code>）定位。
+</footer>
+</main>
+</div>
+</body>
+</html>

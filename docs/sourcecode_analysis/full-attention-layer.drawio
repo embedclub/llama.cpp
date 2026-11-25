@@ -1,0 +1,151 @@
+<mxfile host="app.diagrams.net" modified="2026-11-25T00:00:00.000Z" agent="opencode" version="24.7.17">
+  <diagram id="full-attn-layer" name="Full Attention 单层">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1520" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Full Attention 单层执行流程（以 llama 架构为例）" style="text;html=1;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="700" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="源码：src/models/llama.cpp · src/llama-graph.cpp · build_attn / build_attn_mha" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="350" y="60" width="700" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;图例&lt;/b&gt;&lt;br&gt;&lt;font color='#82b366'&gt;■&lt;/font&gt; 归一化 / 输入输出&lt;br&gt;&lt;font color='#6c8ebf'&gt;■&lt;/font&gt; 线性投影&lt;br&gt;&lt;font color='#d79b00'&gt;■&lt;/font&gt; RoPE / KV Cache&lt;br&gt;&lt;font color='#9673a6'&gt;■&lt;/font&gt; Attention 计算&lt;br&gt;&lt;font color='#b85450'&gt;■&lt;/font&gt; 残差相加&lt;br&gt;&lt;font color='#d6b656'&gt;■&lt;/font&gt; FFN" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#fafafa;strokeColor=#999999;fontSize=11;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="220" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="input" value="输入隐藏状态 h&lt;sub&gt;in&lt;/sub&gt;&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;embedding 或上一层输出&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="110" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="attn_norm" value="RMSNorm（attn_norm）&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:35 · build_norm(LLM_NORM_RMS)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="200" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="qkv" value="Q / K / V 线性投影&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:46 · build_qkv()&lt;br&gt;Wq·x, Wk·x, Wv·x（可含 bias / LoRA）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="290" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rope" value="RoPE 位置编码（Q、K）&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:49-63 · ggml_rope_ext()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="380" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kv_write" value="写入 KV Cache&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:2174-2212 · cpy_k / cpy_v&lt;br&gt;K、V 追加到当前序列的 KV Cache&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="470" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kq" value="注意力分数 KQ = Q · K&lt;sup&gt;T&lt;/sup&gt; · scale&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:2000 附近 · ggml_mul_mat()&lt;br&gt;K 含历史 token（KV Cache 读出）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="560" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mask_softmax" value="Mask + Softmax&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:2027 · ggml_soft_max_ext()&lt;br&gt;因果 mask / padding mask / ALiBi&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="650" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kqv" value="上下文聚合 KQV = P · V&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:2044 · ggml_mul_mat(v, kq)&lt;br&gt;或走 ggml_flash_attn_ext 融合路径&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="740" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wo" value="输出投影 W&lt;sub&gt;o&lt;/sub&gt;&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:2222-2240 · build_lora_mm(wo)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="830" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="res1" value="残差相加 #1&lt;br&gt;ffn_inp = attn_out + h&lt;sub&gt;in&lt;/sub&gt;&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:84&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="920" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ffn_norm" value="RMSNorm（ffn_norm）&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:90 · build_norm(LLM_NORM_RMS)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1010" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ffn_up" value="FFN 升维 + 门控&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:95 · build_ffn()&lt;br&gt;gate = SiLU(W&lt;sub&gt;gate&lt;/sub&gt;·x), up = W&lt;sub&gt;up&lt;/sub&gt;·x&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1100" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ffn_down" value="FFN 降维&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:1141 · W&lt;sub&gt;down&lt;/sub&gt;·(gate ⊙ up)&lt;br&gt;MoE 层则走 build_moe_ffn()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1190" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="res2" value="残差相加 #2&lt;br&gt;l_out = ffn_out + ffn_inp&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:126&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1280" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="output" value="输出到下一层（或 final norm + LM head）&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/models/llama.cpp:129-140&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1370" width="440" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="input" target="attn_norm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="attn_norm" target="qkv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="qkv" target="rope">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="rope" target="kv_write">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="kv_write" target="kq">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="kq" target="mask_softmax">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="mask_softmax" target="kqv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="kqv" target="wo">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="wo" target="res1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="res1" target="ffn_norm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="ffn_norm" target="ffn_up">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="ffn_up" target="ffn_down">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="ffn_down" target="res2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeWidth=2;strokeColor=#333333;" edge="1" parent="1" source="res2" target="output">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="res_edge1" value="残差（skip attention）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;endArrow=block;strokeWidth=2;strokeColor=#b85450;fontSize=11;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="input" target="res1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="300" y="140" />
+              <mxPoint x="300" y="950" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="res_edge2" value="残差（skip FFN）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;endArrow=block;strokeWidth=2;strokeColor=#b85450;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="res1" target="res2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="920" y="950" />
+              <mxPoint x="920" y="1310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="note_causal" value="&lt;b&gt;关键点&lt;/b&gt;&lt;br&gt;• prefill 与 decode 走同一套图：&lt;br&gt;&amp;nbsp;&amp;nbsp;区别只是 K/V 的 token 数&lt;br&gt;• KV Cache 让历史 K/V 不必重算&lt;br&gt;• 计算复杂度：O(n&lt;sup&gt;2&lt;/sup&gt;·d)（每层）&lt;br&gt;• Flash Attention 开启时：&lt;br&gt;&amp;nbsp;&amp;nbsp;KQ / softmax / KQV 融合为&lt;br&gt;&amp;nbsp;&amp;nbsp;ggml_flash_attn_ext()&lt;br&gt;&lt;font style='font-size:10px;color:#666666'&gt;src/llama-graph.cpp:1952-1970&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f5f5f5;strokeColor=#999999;fontSize=11;spacingLeft=10;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="990" y="560" width="340" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="note_ffn" value="&lt;b&gt;FFN 分支&lt;/b&gt;&lt;br&gt;• 普通模型：gate/up/down 三层 MLP&lt;br&gt;• MoE 模型：build_moe_ffn()&lt;br&gt;&amp;nbsp;&amp;nbsp;先 router 选 expert，再分组计算&lt;br&gt;• 残差在 FFN 之前就已保存（ffn_inp）" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f5f5f5;strokeColor=#999999;fontSize=11;spacingLeft=10;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="990" y="1010" width="340" height="130" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
